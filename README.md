@@ -3,7 +3,7 @@
 [![Status](https://img.shields.io/badge/Status-EM%20DESENVOLVIMENTO-yellow?style=for-the-badge&logo=git)](https://github.com/PedroLssouza/jogo_tycoon)
 [![React](https://img.shields.io/badge/React-18.3-61DAFB?style=for-the-badge&logo=react&logoColor=black)](https://react.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.5-3178C6?style=for-the-badge&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Vite](https://img.shields.io/badge/Vite-5.4-646CFF?style=for-the-badge&logo=vite&logoColor=white)](https://vitejs.dev/)
+[![Vite](https://img.shields.io/badge/Vite-8-646CFF?style=for-the-badge&logo=vite&logoColor=white)](https://vitejs.dev/)
 [![TailwindCSS](https://img.shields.io/badge/TailwindCSS-3.4-38B2AC?style=for-the-badge&logo=tailwind-css&logoColor=white)](https://tailwindcss.com/)
 
 > ⚠️ **AVISO: PROJETO EM DESENVOLVIMENTO ATIVO (WIP)**  
@@ -212,32 +212,42 @@ O ecossistema do projeto foi estruturado com foco em performance, tipagem estrit
 
 ---
 
-## 💻 Como Rodar o Projeto Localmente
+## 💻 Como rodar o jogo em outra máquina
 
-### Pré-requisitos
-- [Node.js](https://nodejs.org/) (versão 18.0 ou superior recomendada)
-- Gerenciador de pacotes `npm` ou `yarn` / `pnpm`
+Você precisa ter o [Node.js](https://nodejs.org/) 20 ou mais recente e o Git instalados.
 
-### Passo a Passo
+1. Clone diretamente a branch jogável:
 
-1. **Clone o repositório:**
    ```bash
-   git clone https://github.com/PedroLssouza/jogo_tycoon.git
+   git clone -b teste01 https://github.com/PedroLssouza/jogo_tycoon.git
    cd jogo_tycoon
    ```
 
-2. **Instale as dependências:**
+2. Instale as dependências:
+
    ```bash
-   npm install
+   npm ci
    ```
 
-3. **Inicie o servidor de desenvolvimento:**
+3. Inicie o jogo:
+
    ```bash
    npm run dev
    ```
 
-4. **Acesse no navegador:**
-   Abra a URL indicada no terminal (geralmente [http://localhost:5173](http://localhost:5173)).
+4. Abra no navegador o endereço exibido no terminal, normalmente:
+
+   ```text
+   http://localhost:5173
+   ```
+
+O progresso da partida fica salvo somente no navegador da máquina através do `localStorage`.
+
+Para verificar a versão de produção antes de enviar alterações, execute:
+
+```bash
+npm run build
+```
 
 ---
 
