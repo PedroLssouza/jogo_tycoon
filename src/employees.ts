@@ -25,7 +25,7 @@ function pickName(): string {
   return `${pick(FIRST_NAMES)} ${pick(LAST_NAMES)}`
 }
 
-function baseStatsFor(role: Role, exp: number) {
+function baseStatsFor(exp: number) {
   const base: Record<number, { productivity: number; speed: number; quality: number }> = {
     0: { productivity: 40, speed: 35, quality: 45 },
     1: { productivity: 55, speed: 50, quality: 60 },
@@ -53,7 +53,7 @@ export function createEmployee(role: Role, experience = 0, salaryMul = 1): Emplo
     pm: 5000,
     devops: 4200,
   }
-  const stats = baseStatsFor(role, experience)
+  const stats = baseStatsFor(experience)
   return {
     id: uid(),
     name: pickName(),

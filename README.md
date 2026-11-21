@@ -9,6 +9,21 @@
 > ⚠️ **AVISO: PROJETO EM DESENVOLVIMENTO ATIVO (WIP)**  
 > Este jogo está em fase de concepção e desenvolvimento de suas mecânicas centrais. Novas funcionalidades, balanceamento e melhorias visuais estão sendo implementadas continuamente de acordo com o roadmap definido.
 
+## ✅ Protótipo jogável
+
+A versão atual já permite percorrer de ponta a ponta a fase **O primeiro contrato** apresentada no pitch da disciplina:
+
+- criação da empresa, escolha de dificuldade e salvamento automático;
+- negociação do Sistema de Vendas (referência de R$ 30 mil e 45 dias);
+- recusa contextual do cliente quando valor, prazo ou ambos são altos;
+- envio de contraproposta e renegociação do contrato recusado;
+- backlog com dependências, alocação dos dois desenvolvedores e Kanban;
+- avanço diário com produtividade, energia, despesas e contagem do prazo;
+- validação das tarefas, cálculo de qualidade, bônus, multas e reputação;
+- contratação opcional de novos profissionais.
+
+O protótipo usa somente dados locais e salva o progresso no `localStorage` do navegador.
+
 ---
 
 ## 🎮 Sobre o Jogo

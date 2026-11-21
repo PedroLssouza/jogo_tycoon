@@ -1,7 +1,5 @@
-import { v4 as uuid } from 'uuid'
-
 export function uid(): string {
-  return uuid()
+  return crypto.randomUUID()
 }
 
 export function clamp(v: number, min = 0, max = 100): number {
