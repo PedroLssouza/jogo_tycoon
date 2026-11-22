@@ -272,12 +272,12 @@ function PixelApp() {
         <button className="pixel-logo" onClick={() => setScreen('menu')} aria-label="Voltar ao menu">
           <span className="growth">▁▃▆↗</span><b>Project <em>Tycoon</em></b>
         </button>
-        {state && screen !== 'menu' && <div className="compact-hud"><span>💵 {formatMoney(state.balance)}</span><span>⭐ {state.reputation}</span><span>📅 Dia {state.day}</span></div>}
+        {state && screen !== 'menu' && <span className="current-company">{state.company} · {screen === 'office' ? 'Escritório' : screen === 'contract' ? 'Contratos' : screen === 'kanban' ? 'Projetos' : 'Resultados'}</span>}
       </header>
 
       <main className="pixel-stage">
         {screen === 'menu' && <MenuScreen hasSave={Boolean(state)} onNew={newGame} onContinue={continueGame} />}
-        {screen === 'office' && <OfficeScreen state={state} onContract={() => setScreen('contract')} onKanban={() => setScreen('kanban')} onTeam={() => setModal('team')} onFinance={() => setModal('finance')} />}
+        {screen === 'office' && <OfficeScreen state={state} onContract={() => setScreen('contract')} onKanban={() => setScreen('kanban')} onTeam={() => setModal('team')} onFinance={() => setModal('finance')} onAdvance={advanceDay} onUnavailable={() => setToast('Este módulo será liberado em uma próxima fase.')} />}
         {screen === 'contract' && <ContractScreen hasProposal={Boolean(proposal)} project={project} onBack={() => setScreen('office')} onAccept={() => signContract(30_000, 45)} onNegotiate={openNegotiation} onKanban={() => setScreen('kanban')} />}
         {screen === 'kanban' && <KanbanScreen state={state} project={project} completion={completion} onTasks={() => setModal('tasks')} onAdvance={advanceDay} onBack={() => setScreen('office')} />}
         {screen === 'results' && <ResultsScreen state={state} project={project} onContinue={() => setScreen('office')} />}
@@ -309,10 +309,10 @@ function MenuScreen({ hasSave, onNew, onContinue }: { hasSave: boolean; onNew: (
   return <SlideCrop slide="menu" className="menu-scene"><button className="hotspot menu-new" onClick={onNew} aria-label="Novo projeto" /><button className="hotspot menu-continue" disabled={!hasSave} onClick={onContinue} aria-label="Continuar partida" />{!hasSave && <span className="no-save">SEM SAVE</span>}</SlideCrop>
 }
 
-function OfficeScreen({ state, onContract, onKanban, onTeam, onFinance }: { state: GameState | null; onContract: () => void; onKanban: () => void; onTeam: () => void; onFinance: () => void }) {
+function OfficeScreen({ state, onContract, onKanban, onTeam, onFinance, onAdvance, onUnavailable }: { state: GameState | null; onContract: () => void; onKanban: () => void; onTeam: () => void; onFinance: () => void; onAdvance: () => void; onUnavailable: () => void }) {
   if (!state) return null
   const hasProposal = state.availableContracts.length > 0
-  return <SlideCrop slide="office" className="office-scene"><div className="office-live-hud"><span>💵 {formatMoney(state.balance)}</span><span>⭐ Reputação: {state.reputation}</span><span>📅 Dia {state.day}</span></div>{hasProposal && <button className="contract-alert" onClick={onContract}>🏆 <b>Novo contrato disponível!</b><small>Clique para negociar</small></button>}<button className="hotspot office-team" onClick={onTeam} aria-label="Equipe" /><button className="hotspot office-projects" onClick={onKanban} aria-label="Projetos" /><button className="hotspot office-contracts" onClick={onContract} aria-label="Contratos" /><button className="hotspot office-finance" onClick={onFinance} aria-label="Finanças" /></SlideCrop>
+  return <SlideCrop slide="office" className="office-scene"><div className="office-live-hud"><span className="office-stat money">💵 <b>{formatMoney(state.balance)}</b></span><span className="office-stat reputation">⭐ <b>Reputação: {state.reputation}</b><em><i style={{ width: `${state.reputation}%` }} /></em></span><span className="office-stat calendar">📅 <b>Dia {state.day} / 60</b></span><div className="office-time-controls"><button type="button" aria-label="Jogo pausado" title="O tempo avança somente quando você decidir">Ⅱ</button><button type="button" onClick={onAdvance} aria-label="Avançar dia" title="Avançar um dia">▶</button></div></div>{hasProposal && <button className="contract-alert" onClick={onContract}>🏆 <b>Novo contrato disponível!</b><small>Clique para negociar</small></button>}<button className="hotspot office-team" onClick={onTeam} aria-label="Equipe" /><button className="hotspot office-projects" onClick={onKanban} aria-label="Projetos" /><button className="hotspot office-contracts" onClick={onContract} aria-label="Contratos" /><button className="hotspot office-finance" onClick={onFinance} aria-label="Finanças" /><button className="hotspot office-research" onClick={onUnavailable} aria-label="Pesquisa" /><button className="hotspot office-settings" onClick={onUnavailable} aria-label="Configurações" /></SlideCrop>
 }
 
 function ContractScreen({ hasProposal, project, onBack, onAccept, onNegotiate, onKanban }: { hasProposal: boolean; project?: Contract; onBack: () => void; onAccept: () => void; onNegotiate: () => void; onKanban: () => void }) {
