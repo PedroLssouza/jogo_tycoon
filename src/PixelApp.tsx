@@ -12,12 +12,12 @@ import {
   taskDependenciesDone,
 } from './game'
 import { deleteSave, loadGame, saveGame } from './storage'
-import type { Contract, Difficulty, GameState, Role, Task } from './types'
+import type { Contract, Difficulty, GameState, Role, Task, TaskStatus } from './types'
 import { clamp, formatMoney, uid } from './utils'
 import './pixel.css'
 
 type PixelScreen = 'menu' | 'office' | 'contract' | 'kanban' | 'results'
-type Modal = 'setup' | 'negotiation' | 'tasks' | 'team' | 'finance' | null
+type Modal = 'setup' | 'negotiation' | 'tasks' | 'team' | 'finance' | 'notifications' | null
 
 const ROLE_LABEL: Record<Role, string> = {
   frontend: 'Front-end', backend: 'Back-end', fullstack: 'Full Stack', designer: 'UI/UX',
@@ -43,6 +43,7 @@ function PixelApp() {
   const [offerValue, setOfferValue] = useState(30_000)
   const [offerDeadline, setOfferDeadline] = useState(45)
   const [negotiationMessage, setNegotiationMessage] = useState('')
+  const [taskFilter, setTaskFilter] = useState<TaskStatus | 'all'>('all')
 
   useEffect(() => { if (state) saveGame(state) }, [state])
   useEffect(() => {
@@ -167,6 +168,19 @@ function PixelApp() {
   }
 
   function advanceDay() {
+    if (!state) return
+    const finishedNow = state.contracts.flatMap(contract => contract.tasks.flatMap(task => {
+      if (task.status !== 'inprogress' || !task.assignedTo) return []
+      const employee = state.employees.find(item => item.id === task.assignedTo)
+      if (!employee) return []
+      const gain = calculateTaskGain(employee.productivity, employee.speed, task.complexity, state.difficulty)
+      return task.progress < 100 && task.progress + gain >= 100 ? [{ task: task.name, employee: employee.name }] : []
+    }))
+    const completionMessage = finishedNow.length === 1
+      ? `🔔 ${finishedNow[0].employee} terminou “${finishedNow[0].task}”. A tarefa foi para Em testes.`
+      : finishedNow.length > 1
+        ? `🔔 ${finishedNow.length} tarefas foram concluídas e aguardam validação em Em testes.`
+        : ''
     setState(current => {
       if (!current) return current
       const cost = dailyEmployeeCost(current)
@@ -201,10 +215,18 @@ function PixelApp() {
           state: busyIds.has(employee.id) ? 'working' : 'idle',
           currentTaskId: busyIds.has(employee.id) ? employee.currentTaskId : null,
         })),
-        gameLog: [{ day: current.day + 1, message: reachedReview ? `${reachedReview} tarefa(s) pronta(s) para validar.` : `Custo do dia: ${formatMoney(cost)}.` }, ...current.gameLog],
+        notifications: completionMessage
+          ? [{ id: uid(), type: 'success', message: completionMessage, day: current.day + 1, read: false }, ...current.notifications]
+          : current.notifications,
+        gameLog: [{ day: current.day + 1, message: reachedReview ? completionMessage : `Custo do dia: ${formatMoney(cost)}.` }, ...current.gameLog],
       }
     })
-    setToast('Dia avançado: produção, energia, prazo e caixa atualizados.')
+    setToast(completionMessage || 'Dia avançado: produção, energia, prazo e caixa atualizados.')
+  }
+
+  function openTaskColumn(status: TaskStatus | 'all') {
+    setTaskFilter(status)
+    setModal('tasks')
   }
 
   function approveTask(taskId: string) {
@@ -248,13 +270,24 @@ function PixelApp() {
   }
 
   function hire(role: Role) {
+    if (!state || state.balance < 1_200) {
+      setToast('Caixa insuficiente. A contratação custa R$ 1.200.')
+      return
+    }
     setState(current => {
-      if (!current || current.balance < 1_200) return current
+      if (!current) return current
       const employee = createEmployee(role, 15)
       employee.hiredAt = current.day
       return { ...current, balance: current.balance - 1_200, expenses: current.expenses + 1_200, employees: [...current.employees, employee] }
     })
     setToast('Novo profissional contratado por R$ 1.200.')
+  }
+
+  function markNotificationsRead() {
+    setState(current => current ? {
+      ...current,
+      notifications: current.notifications.map(notification => ({ ...notification, read: true })),
+    } : current)
   }
 
   function resetSave() {
@@ -279,15 +312,16 @@ function PixelApp() {
         {screen === 'menu' && <MenuScreen hasSave={Boolean(state)} onNew={newGame} onContinue={continueGame} />}
         {screen === 'office' && <OfficeScreen state={state} onContract={() => setScreen('contract')} onKanban={() => setScreen('kanban')} onTeam={() => setModal('team')} onFinance={() => setModal('finance')} onAdvance={advanceDay} onUnavailable={() => setToast('Este módulo será liberado em uma próxima fase.')} />}
         {screen === 'contract' && <ContractScreen hasProposal={Boolean(proposal)} project={project} onBack={() => setScreen('office')} onAccept={() => signContract(30_000, 45)} onNegotiate={openNegotiation} onKanban={() => setScreen('kanban')} />}
-        {screen === 'kanban' && <KanbanScreen state={state} project={project} completion={completion} onTasks={() => setModal('tasks')} onAdvance={advanceDay} onBack={() => setScreen('office')} />}
+        {screen === 'kanban' && <KanbanScreen state={state} project={project} completion={completion} onColumn={openTaskColumn} onHire={() => setModal('team')} onNotifications={() => setModal('notifications')} onAdvance={advanceDay} onBack={() => setScreen('office')} />}
         {screen === 'results' && <ResultsScreen state={state} project={project} onContinue={() => setScreen('office')} />}
       </main>
 
       {modal === 'setup' && <SetupModal company={company} founder={founder} difficulty={difficulty} onCompany={setCompany} onFounder={setFounder} onDifficulty={setDifficulty} onClose={() => setModal(null)} onConfirm={confirmNewGame} />}
       {modal === 'negotiation' && proposal && <NegotiationModal contract={proposal} value={offerValue} deadline={offerDeadline} message={negotiationMessage} onValue={setOfferValue} onDeadline={setOfferDeadline} onClose={() => setModal(null)} onSend={sendCounterOffer} />}
-      {modal === 'tasks' && state && project && <TaskModal state={state} project={project} onClose={() => setModal(null)} onAssign={assignTask} onApprove={approveTask} />}
+      {modal === 'tasks' && state && project && <TaskModal state={state} project={project} filter={taskFilter} onClose={() => setModal(null)} onAssign={assignTask} onApprove={approveTask} />}
       {modal === 'team' && state && <TeamModal state={state} onClose={() => setModal(null)} onHire={hire} />}
       {modal === 'finance' && state && <FinanceModal state={state} onClose={() => setModal(null)} />}
+      {modal === 'notifications' && state && <NotificationModal state={state} onReadAll={markNotificationsRead} onClose={() => setModal(null)} />}
       {toast && <div className="pixel-toast">{toast}</div>}
       {state && screen === 'menu' && <button className="delete-save" onClick={resetSave}>Apagar save</button>}
     </div>
@@ -319,9 +353,12 @@ function ContractScreen({ hasProposal, project, onBack, onAccept, onNegotiate, o
   return <SlideCrop slide="contract" className="contract-scene"><button className="scene-back" onClick={onBack}>‹ ESCRITÓRIO</button>{hasProposal ? <><button className="contract-negotiate" onClick={onNegotiate}>🤝 NEGOCIAR CONDIÇÕES</button><button className="hotspot contract-accept" onClick={onAccept} aria-label="Aceitar contrato" /></> : <div className="signed-overlay"><span>✓ CONTRATO ASSINADO</span><b>{project ? `${formatMoney(project.value)} · ${project.deadlineDays} dias` : ''}</b><button onClick={onKanban}>ABRIR KANBAN</button></div>}</SlideCrop>
 }
 
-function KanbanScreen({ state, project, completion, onTasks, onAdvance, onBack }: { state: GameState | null; project?: Contract; completion: number; onTasks: () => void; onAdvance: () => void; onBack: () => void }) {
+function KanbanScreen({ state, project, completion, onColumn, onHire, onNotifications, onAdvance, onBack }: { state: GameState | null; project?: Contract; completion: number; onColumn: (status: TaskStatus | 'all') => void; onHire: () => void; onNotifications: () => void; onAdvance: () => void; onBack: () => void }) {
   if (!state || !project) return <div className="pixel-empty"><h2>SEM PROJETO ATIVO</h2><p>Aceite ou negocie o primeiro contrato.</p><button onClick={onBack}>VOLTAR AO ESCRITÓRIO</button></div>
-  return <SlideCrop slide="kanban" className="kanban-scene"><button className="scene-back" onClick={onBack}>‹ ESCRITÓRIO</button><div className="kanban-live-progress"><b>Progresso: {completion}%</b><span><i style={{ width: `${completion}%` }} /></span></div><button className="hotspot kanban-board" onClick={onTasks} aria-label="Gerenciar tarefas" /><button className="hotspot kanban-advance" onClick={onAdvance} aria-label="Avançar dia" /><button className="manage-tasks" onClick={onTasks}>⚙ GERENCIAR TAREFAS</button><div className="kanban-day">DIA {state.day} · {contractDaysRemaining(project, state.day)} DIAS RESTANTES</div></SlideCrop>
+  const counts: Record<TaskStatus, number> = { todo: 0, inprogress: 0, review: 0, done: 0 }
+  project.tasks.forEach(task => { counts[task.status] += 1 })
+  const unread = state.notifications.filter(notification => !notification.read).length
+  return <SlideCrop slide="kanban" className="kanban-scene"><button className="scene-back" onClick={onBack}>‹ ESCRITÓRIO</button><button className="kanban-notifications" onClick={onNotifications} aria-label="Abrir notificações">🔔<span>{unread}</span></button><div className="kanban-live-progress"><b>Progresso: {completion}%</b><span><i style={{ width: `${completion}%` }} /></span></div><button className="kanban-column backlog" onClick={() => onColumn('todo')}><span>▱</span> Backlog <b>{counts.todo}</b></button><button className="kanban-column development" onClick={() => onColumn('inprogress')}><span>⚙</span> Em desenvolvimento <b>{counts.inprogress}</b></button><button className="kanban-column testing" onClick={() => onColumn('review')}><span>⚗</span> Em testes <b>{counts.review}</b></button><button className="kanban-column completed" onClick={() => onColumn('done')}><span>✓</span> Concluído <b>{counts.done}</b></button><button className="hotspot kanban-backlog-body" onClick={() => onColumn('todo')} aria-label="Ver tarefas do Backlog" /><button className="hotspot kanban-development-body" onClick={() => onColumn('inprogress')} aria-label="Ver tarefas em desenvolvimento" /><button className="hotspot kanban-testing-body" onClick={() => onColumn('review')} aria-label="Ver tarefas em testes" /><button className="hotspot kanban-completed-body" onClick={() => onColumn('done')} aria-label="Ver tarefas concluídas" /><button className="hotspot kanban-advance" onClick={onAdvance} aria-label="Avançar dia" /><button className="kanban-hire" onClick={onHire} aria-label="Contratar profissional">+</button><button className="manage-tasks" onClick={() => onColumn('all')}>⚙ TODAS AS TAREFAS</button><div className="kanban-day">DIA {state.day} · {contractDaysRemaining(project, state.day)} DIAS RESTANTES</div></SlideCrop>
 }
 
 function ResultsScreen({ state, project, onContinue }: { state: GameState | null; project?: Contract; onContinue: () => void }) {
@@ -342,9 +379,17 @@ function NegotiationModal(props: { contract: Contract; value: number; deadline: 
   return <PixelModal title={rejected ? 'RENEGOCIAR CONTRATO' : 'NEGOCIAR CONTRATO'} subtitle="O cliente avalia valor e prazo em conjunto." onClose={props.onClose}><div className="client-message"><span>CLIENTE · MERCADO HORIZONTE</span><p>{rejected ? 'A oferta anterior não funcionou. Envie uma contraproposta mais equilibrada.' : 'Estamos abertos a uma proposta, mas temos limite de orçamento e urgência na entrega.'}</p></div>{props.message && <div className={`negotiation-feedback ${props.message.includes('aceita') ? 'accepted' : ''}`}>{props.message}</div>}<div className="offer-grid"><label>VALOR DA PROPOSTA<input type="number" min="24000" max="45000" step="500" value={props.value} onChange={event => props.onValue(Number(event.target.value))} /></label><label>PRAZO EM DIAS<input type="number" min="30" max="60" value={props.deadline} onChange={event => props.onDeadline(Number(event.target.value))} /></label></div><div className="offer-preview"><span>SUA OFERTA</span><b>{formatMoney(props.value)} · {props.deadline} dias</b></div><button className="pixel-primary" onClick={props.onSend}>🤝 {rejected ? 'ENVIAR CONTRAPROPOSTA' : 'ENVIAR PROPOSTA'}</button></PixelModal>
 }
 
-function TaskModal({ state, project, onClose, onAssign, onApprove }: { state: GameState; project: Contract; onClose: () => void; onAssign: (taskId: string, employeeId: string) => void; onApprove: (taskId: string) => void }) {
+function TaskModal({ state, project, filter, onClose, onAssign, onApprove }: { state: GameState; project: Contract; filter: TaskStatus | 'all'; onClose: () => void; onAssign: (taskId: string, employeeId: string) => void; onApprove: (taskId: string) => void }) {
+  const titles: Record<TaskStatus | 'all', string> = {
+    all: 'TODAS AS TAREFAS',
+    todo: 'BACKLOG',
+    inprogress: 'EM DESENVOLVIMENTO',
+    review: 'EM TESTES',
+    done: 'CONCLUÍDO',
+  }
+  const filteredTasks = filter === 'all' ? project.tasks : project.tasks.filter(task => task.status === filter)
   const availableEmployees = (task: Task) => state.employees.filter(employee => !project.tasks.some(item => item.status === 'inprogress' && item.assignedTo === employee.id) || task.assignedTo === employee.id)
-  return <PixelModal title="GERENCIAMENTO DO PROJETO" subtitle={`${project.name} · ${contractDaysRemaining(project, state.day)} dias restantes`} onClose={onClose} wide><div className="task-manager">{project.tasks.map(task => { const unlocked = taskDependenciesDone(task, project.tasks); const employee = state.employees.find(item => item.id === task.assignedTo); return <article key={task.id} className={`task-row ${task.status} ${!unlocked ? 'locked' : ''}`}><span className="task-icon">{task.status === 'done' ? '✓' : task.status === 'review' ? '⚗' : task.status === 'inprogress' ? '⚙' : '▣'}</span><div><b>{task.name}</b><small>{ROLE_LABEL[task.requiredRole]} · {task.progress}% {employee ? `· ${employee.name}` : ''}</small><span className="task-mini-progress"><i style={{ width: `${task.progress}%` }} /></span></div><div>{task.status === 'todo' && unlocked && <select defaultValue="" onChange={event => event.target.value && onAssign(task.id, event.target.value)}><option value="" disabled>ALOCAR…</option>{availableEmployees(task).map(item => <option key={item.id} value={item.id}>{item.name} · {ROLE_LABEL[item.role]}</option>)}</select>}{task.status === 'todo' && !unlocked && <span className="locked-label">BLOQUEADA</span>}{task.status === 'inprogress' && <span className="working-label">EM PRODUÇÃO</span>}{task.status === 'review' && <button className="approve-task" onClick={() => onApprove(task.id)}>VALIDAR</button>}{task.status === 'done' && <span className="done-label">QUAL. {task.quality}%</span>}</div></article>})}</div></PixelModal>
+  return <PixelModal title={`${titles[filter]} · ${filteredTasks.length}`} subtitle={`${project.name} · ${contractDaysRemaining(project, state.day)} dias restantes`} onClose={onClose} wide><div className="task-manager">{filteredTasks.length === 0 ? <div className="task-empty"><span>◇</span><b>NENHUMA TAREFA NESTA ETAPA</b><small>As tarefas aparecerão aqui quando avançarem no fluxo.</small></div> : filteredTasks.map(task => { const unlocked = taskDependenciesDone(task, project.tasks); const employee = state.employees.find(item => item.id === task.assignedTo); return <article key={task.id} className={`task-row ${task.status} ${!unlocked ? 'locked' : ''}`}><span className="task-icon">{task.status === 'done' ? '✓' : task.status === 'review' ? '⚗' : task.status === 'inprogress' ? '⚙' : '▣'}</span><div><b>{task.name}</b><small>{ROLE_LABEL[task.requiredRole]} · {task.progress}% {employee ? `· ${employee.name}` : ''}</small><span className="task-mini-progress"><i style={{ width: `${task.progress}%` }} /></span></div><div>{task.status === 'todo' && unlocked && <select defaultValue="" onChange={event => event.target.value && onAssign(task.id, event.target.value)}><option value="" disabled>ALOCAR…</option>{availableEmployees(task).map(item => <option key={item.id} value={item.id}>{item.name} · {ROLE_LABEL[item.role]}</option>)}</select>}{task.status === 'todo' && !unlocked && <span className="locked-label">BLOQUEADA</span>}{task.status === 'inprogress' && <span className="working-label">EM PRODUÇÃO</span>}{task.status === 'review' && <button className="approve-task" onClick={() => onApprove(task.id)}>VALIDAR</button>}{task.status === 'done' && <span className="done-label">QUAL. {task.quality}%</span>}</div></article>})}</div></PixelModal>
 }
 
 function TeamModal({ state, onClose, onHire }: { state: GameState; onClose: () => void; onHire: (role: Role) => void }) {
@@ -354,6 +399,11 @@ function TeamModal({ state, onClose, onHire }: { state: GameState; onClose: () =
 
 function FinanceModal({ state, onClose }: { state: GameState; onClose: () => void }) {
   return <PixelModal title="FINANÇAS" subtitle="Sustentabilidade da empresa" onClose={onClose}><div className="finance-grid"><span>CAIXA<b>{formatMoney(state.balance)}</b></span><span>RECEITAS<b>{formatMoney(state.revenue)}</b></span><span>DESPESAS<b>{formatMoney(state.expenses)}</b></span><span>RESULTADO<b>{formatMoney(state.profit)}</b></span></div><p className="finance-tip">Custo operacional estimado por dia: <b>{formatMoney(dailyEmployeeCost(state))}</b></p></PixelModal>
+}
+
+function NotificationModal({ state, onReadAll, onClose }: { state: GameState; onReadAll: () => void; onClose: () => void }) {
+  const unread = state.notifications.filter(notification => !notification.read).length
+  return <PixelModal title="NOTIFICAÇÕES" subtitle={`${unread} não lida${unread === 1 ? '' : 's'}`} onClose={onClose}><div className="notification-list">{state.notifications.length === 0 ? <div className="task-empty"><span>🔔</span><b>NENHUMA NOTIFICAÇÃO</b><small>As atualizações importantes da equipe aparecerão aqui.</small></div> : state.notifications.map(notification => <article key={notification.id} className={`${notification.type} ${notification.read ? 'read' : ''}`}><span>{notification.type === 'success' ? '✓' : notification.type === 'warning' ? '!' : notification.type === 'error' ? '×' : 'i'}</span><div><b>DIA {notification.day}</b><p>{notification.message}</p></div>{!notification.read && <i aria-label="Não lida" />}</article>)}</div>{unread > 0 && <button className="read-all" onClick={onReadAll}>✓ MARCAR TODAS COMO LIDAS</button>}</PixelModal>
 }
 
 export default PixelApp
