@@ -10,7 +10,7 @@ export type Role =
   | 'devops'
 
 export type TaskStatus = 'todo' | 'inprogress' | 'review' | 'done'
-export type ContractStatus = 'available' | 'accepted' | 'inprogress' | 'completed' | 'failed'
+export type ContractStatus = 'available' | 'negotiating' | 'rejected' | 'accepted' | 'inprogress' | 'completed' | 'failed'
 export type EmployeeState = 'idle' | 'working' | 'tired' | 'sick' | 'unhappy' | 'job Hunting'
 
 export interface Employee {
@@ -38,6 +38,8 @@ export interface Task {
   status: TaskStatus
   complexity: number // 1-10
   requiredRole: Role
+  secondaryRole?: Role
+  technology?: string
   estimatedDays: number
   progress: number // 0-100
   assignedTo: string | null // employee id
@@ -65,6 +67,13 @@ export interface Contract {
   completedAt: number | null
   tasks: Task[]
   minQuality: number
+  negotiationAttempts: number
+  originalValue: number
+  originalDeadlineDays: number
+  rejectionReason: 'value' | 'deadline' | 'both' | null
+  category?: string
+  featureList?: string[]
+  buildingType?: 'retail' | 'delivery' | 'ead' | 'fintech' | 'health'
 }
 
 export interface ProjectMetrics {
