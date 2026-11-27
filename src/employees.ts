@@ -6,6 +6,16 @@ const FIRST_NAMES = [
   'Laura','Matheus','Natália','Olavo','Paula','Rafael','Sabrina','Thiago','Valentina','Wallace',
   'Yasmin','Arthur','Breno','Camila','Daniel','Eduardo','Fernanda','Gustavo','Hugo','Isabela'
 ]
+const FEMALE_NAMES = new Set([
+  'Ana','Carla','Eduarda','Helena','Juliana','Laura','Natália','Paula','Sabrina','Valentina',
+  'Yasmin','Camila','Fernanda','Isabela'
+])
+
+/** Define o desenho da personagem a partir do nome sorteado em FIRST_NAMES. */
+export function isWoman(name: string): boolean {
+  return FEMALE_NAMES.has(name.split(' ')[0])
+}
+
 const LAST_NAMES = [
   'Silva','Santos','Oliveira','Souza','Lima','Pereira','Costa','Almeida','Nascimento','Araújo',
   'Ferreira','Gomes','Ribeiro','Alves','Carvalho','Teixeira','Mendes','Barbosa','Rocha','Dias',

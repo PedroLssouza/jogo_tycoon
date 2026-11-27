@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { createEmployee } from './employees'
 import {
   calculateProjectQuality,
@@ -7,18 +7,35 @@ import {
   createInitialState,
   createProjectTasks,
   dailyEmployeeCost,
+  PSYCHOLOGIST_DAILY,
   evaluateOffer,
   getAllStarterContracts,
+  GPU_PRICE,
+  gpusOf,
+  withGpuGift,
+  TURBO_DAYS,
+  turboDaysLeft,
   settlementFor,
   taskDependenciesDone,
 } from './game'
 import { deleteSave, loadGame, saveGame } from './storage'
-import type { Contract, Difficulty, GameState, Role, Task } from './types'
+import type { Contract, Difficulty, Employee, GameState, Role, Task } from './types'
 import { clamp, formatMoney, uid } from './utils'
+import { MalwareGame } from './MalwareGame'
+import type { RackView, TutorAct } from './PixelScenes'
+import { BuildingScene, ClaudeIcon, FoundingScene, MenuScene, LoungeScene, OfficeScene, PixelIcon, Portrait, ServerRoom, GpuIcon, SpinningCoin, TutorScene, VictoryScene } from './PixelScenes'
+import { applyFatigue, restAfterProject, WELLNESS, deskCapacity, FLOORS, hostingDaysLeft, hostingIncome, racksInUse, refillHosting, daysToBankruptcy, eventById, endOfDay, LOAN, newAchievements, nextOffice, officeOf, refillMarket, SALE_PRICE, SALE_REVENUE_GOAL, saleReady, statsOf, bump, log } from './progression'
+import { sfx } from './sound'
+import { playMusic, stopMusic, unlockAudioOnGesture } from './music'
+import type { TrackId } from './music'
+import type { Sound } from './sound'
+import { PixelModal } from './PixelModal'
+import { DiaryModal, ElevatorModal, EndingScreen, EventModal, SaleModal } from './PixelPanels'
+import type { FloorId } from './PixelPanels'
 import './pixel.css'
 
-type PixelScreen = 'menu' | 'office' | 'contract' | 'kanban' | 'results'
-type Modal = 'setup' | 'negotiation' | 'tasks' | 'team' | 'finance' | null
+type PixelScreen = 'menu' | 'office' | 'contract' | 'kanban' | 'results' | 'ending' | 'floor2' | 'servers' | 'lounge'
+type Modal = 'setup' | 'negotiation' | 'tasks' | 'team' | 'finance' | 'malware' | 'tutor' | 'event' | 'diary' | 'sale' | 'elevator' | null
 
 const ROLE_LABEL: Record<Role, string> = {
   frontend: 'Front-end',
@@ -30,15 +47,6 @@ const ROLE_LABEL: Record<Role, string> = {
   devops: 'DevOps & Cloud',
 }
 
-const ROLE_SHORT: Record<Role, string> = {
-  frontend: 'FRONT',
-  backend: 'BACK',
-  fullstack: 'FULL',
-  designer: 'UI/UX',
-  qa: 'QA',
-  pm: 'PM',
-  devops: 'OPS',
-}
 
 const ROLE_COLOR: Record<Role, string> = {
   frontend: '#10b981',
@@ -50,34 +58,44 @@ const ROLE_COLOR: Record<Role, string> = {
   devops: '#ef4444',
 }
 
-const ROLE_HAIR: Record<Role, string> = {
-  frontend: '#78350f',
-  backend: '#1e1b4b',
-  fullstack: '#0f172a',
-  designer: '#d97706',
-  qa: '#b45309',
-  pm: '#374151',
-  devops: '#64748b',
+/* Equipe mais o coringa em ação, para achar quem faz cada tarefa */
+function staffOf(state: GameState): Employee[] {
+  return state.joker ? [...state.employees, state.joker] : state.employees
 }
 
-const ROLE_CODE_COLORS: Record<Role, [string, string, string]> = {
-  frontend: ['#4cf17c', '#63e8ff', '#ffd166'],
-  backend: ['#63e8ff', '#ffd166', '#a855f7'],
-  fullstack: ['#38bdf8', '#4cf17c', '#f59e0b'],
-  designer: ['#ec4899', '#f43f5e', '#a855f7'],
-  qa: ['#f59e0b', '#10b981', '#ef4444'],
-  pm: ['#14b8a6', '#3b82f6', '#f59e0b'],
-  devops: ['#ef4444', '#f97316', '#22c55e'],
+/* Qualidade com que alguém entrega a tarefa hoje */
+function deliveryQuality(employee: Employee | undefined, task: Task, officeBonus = 0) {
+  const isIdeal = employee?.role === task.requiredRole
+  const isAlt = employee && ((task.secondaryRole && employee.role === task.secondaryRole) || (employee.role === 'fullstack' && ['frontend', 'backend'].includes(task.requiredRole)))
+  const techBonus = isIdeal ? 10 : isAlt ? 5 : -4
+  return clamp(Math.round((employee?.quality ?? 60) * .88 + (employee?.energy ?? 60) * .12 + techBonus + officeBonus), 50, 100)
+}
+
+const JOKER_QUALITY_LOSS = 5
+
+/* O coringa não custa nada, mas entrega um pouco abaixo de quem substitui
+   (ou da média da equipe, se ninguém estava na tarefa) */
+function jokerQuality(state: GameState, task: Task) {
+  const replaced = state.employees.find(item => item.id === task.assignedTo)
+  const team = replaced ? [replaced] : state.employees
+  const usual = team.length ? team.reduce((sum, item) => sum + deliveryQuality(item, task), 0) / team.length : 60
+  return Math.round(usual) - JOKER_QUALITY_LOSS
+}
+
+function canFightMalware(state: GameState) {
+  return !state.jokers && !state.joker && state.jokerDay !== state.day
 }
 
 function PixelApp() {
   const [state, setState] = useState<GameState | null>(() => {
-    const loaded = loadGame()
-    if (!loaded) return null
+    const saved = loadGame()
+    if (!saved) return null
+    const loaded = withGpuGift(saved)
     if ((!loaded.availableContracts || loaded.availableContracts.length <= 1) && loaded.contracts.length === 0) {
       return { ...loaded, availableContracts: getAllStarterContracts() }
     }
-    return loaded
+    // Saves antigos podiam ficar sem propostas depois dos 5 contratos iniciais
+    return loaded.availableContracts.length < 3 ? refillMarket(loaded) : loaded
   })
   const [screen, setScreen] = useState<PixelScreen>('menu')
   const [modal, setModal] = useState<Modal>(null)
@@ -96,6 +114,29 @@ function PixelApp() {
   } | null>(null)
 
   useEffect(() => { if (state) saveGame(state) }, [state])
+  useEffect(() => unlockAudioOnGesture(), [])
+  // Música ambiente: uma para a tela inicial, uma para o escritório e uma por andar
+  useEffect(() => {
+    const track: TrackId = screen === 'menu' || screen === 'ending' ? 'menu' : screen === 'floor2' ? 'team' : screen === 'servers' ? 'servers' : screen === 'lounge' ? 'lounge' : 'office'
+    playMusic(track)
+  }, [screen])
+  useEffect(() => () => stopMusic(), [])
+  useEffect(() => {
+    if (!state) return
+    const unlocked = newAchievements(state)
+    if (!unlocked.length) return
+    setState(current => current && { ...current, achievements: [...(current.achievements ?? []), ...unlocked.map(a => a.id)] })
+    sfx('achievement')
+    setToast(`🏅 Conquista: ${unlocked.map(a => a.title).join(', ')}!`)
+  }, [state])
+  useEffect(() => {
+    if (state?.ended && screen !== 'ending' && screen !== 'menu') { setModal(null); setScreen('ending') }
+  }, [state?.ended, screen])
+  useEffect(() => {
+    if (!state || modal || !['office', 'kanban', 'contract'].includes(screen)) return
+    if (state.pendingEvent) setModal('event')
+    else if (saleReady(state) && !state.saleOfferSeen) setModal('sale')
+  }, [state, modal, screen])
   useEffect(() => {
     if (!toast) return
     const timer = window.setTimeout(() => setToast(''), 3400)
@@ -127,11 +168,16 @@ function PixelApp() {
 
   function continueGame() {
     if (!state) return newGame()
-    const completed = state.contracts.some(contract => contract.status === 'completed')
-    setScreen(completed ? 'results' : 'office')
+    setScreen(state.ended ? 'ending' : 'office')
   }
 
   function signContract(contractToSign: Contract, value: number, deadlineDays: number) {
+    if (state?.contracts.some(contract => ['accepted', 'inprogress'].includes(contract.status))) {
+      sfx('error')
+      setToast('Termine o projeto atual antes de aceitar outro.')
+      return
+    }
+    sfx('coin')
     setState(current => {
       if (!current) return current
       const accepted: Contract = {
@@ -202,6 +248,7 @@ function PixelApp() {
       if (!active || !task || !taskDependenciesDone(task, active.tasks)) return current
       const busy = current.contracts.some(contract => contract.tasks.some(item => item.assignedTo === employeeId && item.status === 'inprogress'))
       if (busy) { setToast('Esse profissional já está trabalhando em outra tarefa.'); return current }
+      if (current.employees.find(e => e.id === employeeId)?.state === 'burnout') { setToast('Em burnout: trate com um psicólogo antes.'); return current }
 
       const dev = current.employees.find(e => e.id === employeeId)
       if (dev) {
@@ -234,58 +281,74 @@ function PixelApp() {
   }
 
   function advanceDay() {
-    setState(current => {
-      if (!current) return current
-      const cost = dailyEmployeeCost(current)
-      let reachedReview = 0
-      const contracts = current.contracts.map(contract => {
-        if (!['accepted', 'inprogress'].includes(contract.status)) return contract
-        return {
-          ...contract,
-          status: 'inprogress' as const,
-          tasks: contract.tasks.map(task => {
-            if (task.status !== 'inprogress' || !task.assignedTo) return task
-            const employee = current.employees.find(item => item.id === task.assignedTo)
-            if (!employee) return task
-            const gain = calculateTaskGain(employee, task, current.difficulty)
-            const progress = clamp(task.progress + gain)
-            if (progress >= 100) reachedReview += 1
-            return { ...task, progress, status: progress >= 100 ? 'review' as const : task.status }
-          }),
-        }
-      })
-      const busyIds = new Set(contracts.flatMap(contract => contract.tasks.filter(task => task.status === 'inprogress').map(task => task.assignedTo)))
+    if (!state || state.ended) return
+    const current = state
+    const cost = dailyEmployeeCost(current)
+    const turbo = turboDaysLeft(current) > 0
+    const office = officeOf(current)
+    let reachedReview = 0
+    const contracts = current.contracts.map(contract => {
+      if (!['accepted', 'inprogress'].includes(contract.status)) return contract
       return {
-        ...current,
-        day: current.day + 1,
-        balance: current.balance - cost,
-        expenses: current.expenses + cost,
-        profit: current.revenue - current.expenses - cost,
-        contracts,
-        employees: current.employees.map(employee => ({
-          ...employee,
-          energy: clamp(employee.energy + (busyIds.has(employee.id) ? -7 : 9)),
-          state: busyIds.has(employee.id) ? 'working' : 'idle',
-          currentTaskId: busyIds.has(employee.id) ? employee.currentTaskId : null,
-        })),
-        gameLog: [{ day: current.day + 1, message: reachedReview ? `${reachedReview} tarefa(s) pronta(s) para validação.` : `Custo operacional diário: ${formatMoney(cost)}.` }, ...current.gameLog],
+        ...contract,
+        status: 'inprogress' as const,
+        tasks: contract.tasks.map(task => {
+          if (task.status !== 'inprogress' || !task.assignedTo) return task
+          const employee = staffOf(current).find(item => item.id === task.assignedTo)
+          if (!employee) return task
+          // No turbo, cada tarefa anda o dobro: meio período por etapa
+          // Turbo dobra; psicóloga na empresa ajuda; muito cansado rende menos
+          const tired = employee.energy < 25 ? 0.6 : 1
+          const gain = calculateTaskGain(employee, task, current.difficulty) * (turbo ? 2 : 1) * (current.psychologist ? WELLNESS.psychBoost : 1) * tired
+          const progress = clamp(task.progress + gain)
+          if (progress >= 100) reachedReview += 1
+          return { ...task, progress, status: progress >= 100 ? 'review' as const : task.status }
+        }),
       }
     })
-    setToast('Dia avançado: progresso, caixas e energia atualizados!')
+    const busyIds = new Set(contracts.flatMap(contract => contract.tasks.filter(task => task.status === 'inprogress').map(task => task.assignedTo)))
+    const worked: GameState = {
+      ...current,
+      day: current.day + 1,
+      balance: current.balance - cost,
+      expenses: current.expenses + cost,
+      profit: current.revenue - current.expenses - cost,
+      contracts,
+      employees: current.employees,
+      gameLog: [{ day: current.day + 1, message: reachedReview ? `${reachedReview} tarefa(s) pronta(s) para validação.` : `Custo operacional diário: ${formatMoney(cost)}.` }, ...current.gameLog].slice(0, 80),
+    }
+    const fatigue = applyFatigue(worked, busyIds, turbo, office.energy)
+    const { state: next, news } = endOfDay(fatigue.state)
+    setState(next)
+    if (news.bankrupt) return
+    if (news.event) { sfx('event'); setModal('event'); return }
+    sfx('day')
+    if (fatigue.news.burnout.length) {
+      sfx('hurt')
+      setToast(`🔥 ${fatigue.news.burnout.join(', ')} teve burnout! Pague um psicólogo na tela Equipe.`)
+      return
+    }
+    setToast(fatigue.news.treated.length ? `🧠 A psicóloga evitou o burnout de ${fatigue.news.treated.join(', ')}.`
+      : fatigue.news.exhausted.length ? `😩 ${fatigue.news.exhausted.join(', ')} se esgotou (1/2). Mais uma vez e é burnout!`
+      : news.hostingEnded ? `🖥 Locação encerrada: ${news.hostingEnded.join(', ')}. Racks livres!`
+      : news.quit ? `😢 ${news.quit} pediu demissão por estar insatisfeito.`
+      : news.loanPaid ? `🏦 Empréstimo quitado: −${formatMoney(news.loanPaid)}.`
+      : reachedReview ? `✓ ${reachedReview} tarefa(s) pronta(s) para validar!`
+      : news.newOffer ? '📬 Nova proposta no mercado!'
+      : 'Dia avançado: progresso, caixas e energia atualizados!')
   }
 
   function approveTask(taskId: string) {
     let finished = false
+    let earnedGpu = false
     setState(current => {
       if (!current) return current
       const active = current.contracts.find(contract => contract.id === project?.id)
       const task = active?.tasks.find(item => item.id === taskId)
       if (!active || !task || task.status !== 'review') return current
-      const employee = current.employees.find(item => item.id === task.assignedTo)
-      const isIdeal = employee?.role === task.requiredRole
-      const isAlt = employee && ((task.secondaryRole && employee.role === task.secondaryRole) || (employee.role === 'fullstack' && ['frontend', 'backend'].includes(task.requiredRole)))
-      const techBonus = isIdeal ? 10 : isAlt ? 5 : -4
-      const quality = clamp(Math.round((employee?.quality ?? 60) * .88 + (employee?.energy ?? 60) * .12 + techBonus), 50, 100)
+      const employee = staffOf(current).find(item => item.id === task.assignedTo)
+      // A qualidade do coringa já foi definida quando ele assumiu a tarefa
+      const quality = employee && employee.id === current.joker?.id ? employee.quality : deliveryQuality(employee, task, officeOf(current).quality)
       let updated: Contract = {
         ...active,
         tasks: active.tasks.map(item => item.id === taskId
@@ -302,6 +365,7 @@ function PixelApp() {
         balance += settlement.payment
         revenue += settlement.payment
         reputation = clamp(reputation + settlement.reputationDelta)
+        if (settlement.quality >= 100) earnedGpu = true
         // Salvar dados de settlement para a tela de resultados
         window.setTimeout(() => setLastSettlement({
           payment: settlement.payment,
@@ -315,28 +379,269 @@ function PixelApp() {
           clientName: active.client,
         }), 0)
       }
-      return {
+      const after: GameState = {
         ...current,
         balance,
         revenue,
         reputation,
+        joker: current.joker?.id === task.assignedTo ? null : current.joker,
+        gpus: gpusOf(current) + (earnedGpu ? 1 : 0),
         profit: revenue - current.expenses,
         contracts: current.contracts.map(contract => contract.id === active.id ? updated : contract),
         employees: current.employees.map(item => item.id === task.assignedTo ? { ...item, state: 'idle', currentTaskId: null } : item),
       }
+      if (!finished) return after
+      // Projeto entregue: conta para as conquistas e o mercado ganha novas propostas
+      const delivered = refillMarket(restAfterProject(log(bump(after, 'contractsDone'), `${active.name} entregue para ${active.client}.`)))
+      return earnedGpu ? bump(delivered, 'perfect') : delivered
     })
-    if (finished) { setModal(null); setScreen('results'); setToast('🎉 Projeto concluído e entregue com sucesso!') }
+    if (finished) sfx('win')
+    if (finished) { setModal(null); setScreen('results'); setToast(earnedGpu ? '🎉 Entrega perfeita! Você ganhou uma placa de vídeo.' : '🎉 Projeto concluído e entregue com sucesso!') }
     else setToast('✓ Tarefa validada e movida para Concluído.')
   }
 
-  function hire(role: Role) {
+  function feedTutor() {
     setState(current => {
-      if (!current || current.balance < 1_200) return current
-      const employee = createEmployee(role, 15)
-      employee.hiredAt = current.day
-      return { ...current, balance: current.balance - 1_200, expenses: current.expenses + 1_200, employees: [...current.employees, employee] }
+      if (!current || gpusOf(current) < 1 || turboDaysLeft(current) > 0) return current
+      return {
+        ...current,
+        gpus: gpusOf(current) - 1,
+        turboUntil: current.day + TURBO_DAYS,
+        stats: { ...statsOf(current), gpusEaten: statsOf(current).gpusEaten + 1 },
+        employees: current.employees.map(employee => ({ ...employee, energy: clamp(employee.energy * 2) })),
+      }
     })
-    setToast('Novo talento contratado por R$ 1.200.')
+  }
+
+  function buyGpu() {
+    setState(current => {
+      if (!current || current.balance < GPU_PRICE) return current
+      return { ...current, gpus: gpusOf(current) + 1, balance: current.balance - GPU_PRICE, expenses: current.expenses + GPU_PRICE }
+    })
+    sfx('coin')
+    setToast('Placa de vídeo comprada!')
+  }
+
+  function startMalware() {
+    if (!state) return
+    if (state.joker) setToast('O Claude já está trabalhando em uma tarefa.')
+    else if (state.jokers) setToast('Você já tem um coringa. Use-o em uma tarefa do quadro.')
+    else if (!canFightMalware(state)) setToast('Você já enfrentou o malware hoje. Avance um dia.')
+    else setModal('malware')
+  }
+
+  function callJoker(taskId: string) {
+    setState(current => {
+      if (!current?.jokers || current.joker) return current
+      const active = current.contracts.find(contract => contract.id === project?.id)
+      const task = active?.tasks.find(item => item.id === taskId)
+      if (!active || !task || !['todo', 'inprogress'].includes(task.status) || !taskDependenciesDone(task, active.tasks)) return current
+      const replaced = task.assignedTo
+      const joker: Employee = {
+        id: `claude-${taskId}`, name: 'Claude', role: task.requiredRole, salary: 0, experience: 100,
+        productivity: 80, speed: 80, quality: jokerQuality(current, task), specialization: 'Coringa', satisfaction: 100, energy: 100,
+        state: 'working', currentTaskId: taskId, hiredAt: current.day,
+      }
+      return {
+        ...current,
+        jokers: current.jokers - 1,
+        joker,
+        contracts: current.contracts.map(contract => contract.id !== active.id ? contract : {
+          ...contract,
+          status: 'inprogress',
+          tasks: contract.tasks.map(item => item.id === taskId
+            ? { ...item, assignedTo: joker.id, status: 'inprogress', startedAt: item.startedAt ?? current.day }
+            : item),
+        }),
+        employees: current.employees.map(item => item.id === replaced ? { ...item, state: 'idle', currentTaskId: null } : item),
+      }
+    })
+    setToast('Claude assumiu a tarefa!')
+  }
+
+  function hire(role: Role, senior = false) {
+    if (!state) return
+    if (state.employees.length >= deskCapacity(state)) {
+      sfx('error')
+      setToast('Sem mesas livres! Amplie o escritório ou compre um andar pelo elevador.')
+      return
+    }
+    if (senior ? gpusOf(state) < 2 : state.balance < 1_200) { sfx('error'); return }
+    setState(current => {
+      if (!current) return current
+      const employee = createEmployee(role, senior ? 80 : 15)
+      employee.hiredAt = current.day
+      const paid = senior
+        ? { ...current, gpus: gpusOf(current) - 2 }
+        : { ...current, balance: current.balance - 1_200, expenses: current.expenses + 1_200 }
+      return log({ ...paid, employees: [...current.employees, employee] }, `${employee.name} foi contratado(a).`)
+    })
+    sfx('coin')
+    setToast(senior ? 'Talento sênior recrutado com 2 placas de vídeo!' : 'Novo talento contratado por R$ 1.200.')
+  }
+
+  function upgradeOffice() {
+    const target = state && nextOffice(state)
+    if (!state || !target || state.balance < target.cost) { sfx('error'); return }
+    setState(current => current && log({
+      ...current,
+      officeLevel: target.level,
+      balance: current.balance - target.cost,
+      expenses: current.expenses + target.cost,
+    }, `Mudança para: ${target.name}.`))
+    sfx('win')
+    setToast(`🏢 Bem-vindo ao ${target.name}! Agora cabem ${target.desks} pessoas.`)
+  }
+
+  function takeLoan() {
+    if (!state || state.loan) return
+    setState(current => current && log({
+      ...current,
+      balance: current.balance + LOAN.amount,
+      loan: { owed: LOAN.owed, dueDay: current.day + LOAN.days },
+    }, `Empréstimo de ${formatMoney(LOAN.amount)} contratado.`))
+    sfx('coin')
+    setToast(`🏦 ${formatMoney(LOAN.amount)} na conta. Devolva ${formatMoney(LOAN.owed)} em ${LOAN.days} dias.`)
+  }
+
+  function repayLoan() {
+    if (!state?.loan || state.balance < state.loan.owed) { sfx('error'); return }
+    setState(current => current?.loan ? log({
+      ...current,
+      balance: current.balance - current.loan.owed,
+      expenses: current.expenses + current.loan.owed,
+      loan: null,
+    }, 'Empréstimo quitado antes do prazo.') : current)
+    sfx('coin')
+    setToast('🏦 Empréstimo quitado!')
+  }
+
+  function giveBonus(employeeId: string) {
+    if (!state || state.balance < 1_000) { sfx('error'); return }
+    setState(current => current && {
+      ...current,
+      balance: current.balance - 1_000,
+      expenses: current.expenses + 1_000,
+      employees: current.employees.map(e => e.id === employeeId ? { ...e, satisfaction: clamp(e.satisfaction + 25), energy: clamp(e.energy + 10) } : e),
+    })
+    sfx('coin')
+    setToast('🎁 Bônus pago! A pessoa ficou bem mais feliz.')
+  }
+
+  function deployNow(taskId: string) {
+    if (!state || gpusOf(state) < 1) { sfx('error'); return }
+    setState(current => current && {
+      ...current,
+      gpus: gpusOf(current) - 1,
+      contracts: current.contracts.map(contract => ({
+        ...contract,
+        tasks: contract.tasks.map(task => task.id === taskId && task.status === 'inprogress' ? { ...task, progress: 100, status: 'review' } : task),
+      })),
+    })
+    sfx('coin')
+    setToast('⚡ Deploy instantâneo! A tarefa está pronta para validar.')
+  }
+
+  function resolveEvent(option: number) {
+    const event = eventById(state?.pendingEvent)
+    if (!state || !event) { setModal(null); return }
+    const choice = event.options[option]
+    if (choice.can && !choice.can(state)) { sfx('error'); return }
+    setState(current => current && log({ ...choice.apply(current), pendingEvent: null }, `${event.title} ${choice.label}.`))
+    sfx('click')
+    setModal(null)
+  }
+
+  function sellCompany() {
+    if (!state || !saleReady(state)) return
+    setState(current => current && log({
+      ...current,
+      balance: current.balance + SALE_PRICE,
+      saleOfferSeen: true,
+      ended: { kind: 'sold', day: current.day },
+    }, `${current.company} foi vendida por ${formatMoney(SALE_PRICE)}!`))
+    sfx('win')
+    setModal(null)
+    setScreen('ending')
+  }
+
+  function buyFloor(kind: 'team' | 'servers') {
+    const floor = FLOORS[kind]
+    if (!state || state.floors?.[kind] || state.balance < floor.price) { sfx('error'); return }
+    setState(current => {
+      if (!current) return current
+      const bought = log({
+        ...current,
+        floors: { ...current.floors, [kind]: true },
+        balance: current.balance - floor.price,
+        expenses: current.expenses + floor.price,
+      }, `Andar comprado: ${floor.name}.`)
+      return kind === 'servers' ? refillHosting({ ...bought, hostingDay: current.day }) : bought
+    })
+    sfx('win')
+    setToast(kind === 'team' ? `🏢 ${floor.name} liberado: +${FLOORS.team.desks} mesas!` : `🖥 ${floor.name} liberado: alugue racks para clientes!`)
+  }
+
+  function rideTo(floor: FloorId) {
+    setModal(null)
+    setScreen(floor === 'team' ? 'floor2' : floor === 'servers' ? 'servers' : 'office')
+  }
+
+  function acceptHosting(dealId: string) {
+    const deal = state?.hostingOffers?.find(item => item.id === dealId)
+    if (!state || !deal || racksInUse(state) + deal.racks > FLOORS.servers.racks) { sfx('error'); return }
+    setState(current => current && log({
+      ...current,
+      hostingOffers: (current.hostingOffers ?? []).filter(item => item.id !== dealId),
+      hosting: [...(current.hosting ?? []), { ...deal, startDay: current.day }],
+    }, `Locação fechada: ${deal.client} (${deal.racks} rack${deal.racks > 1 ? 's' : ''}).`))
+    sfx('coin')
+    setToast(`🖥 ${deal.client} alugou ${deal.racks} rack${deal.racks > 1 ? 's' : ''}: +${formatMoney(deal.dailyRent)} por dia.`)
+  }
+
+  function treatBurnout(employeeId: string) {
+    if (!state || state.balance < WELLNESS.treatPrice) { sfx('error'); return }
+    setState(current => current && log({
+      ...current,
+      balance: current.balance - WELLNESS.treatPrice,
+      expenses: current.expenses + WELLNESS.treatPrice,
+      employees: current.employees.map(e => e.id === employeeId ? { ...e, state: 'idle', energy: 70, zeroes: 0, satisfaction: clamp(e.satisfaction + 10) } : e),
+    }, 'Sessões de psicólogo pagas para tratar um burnout.'))
+    sfx('coin')
+    setToast('🧠 Tratamento pago! A pessoa voltou com 70% de energia.')
+  }
+
+  function hirePsychologist() {
+    if (!state || state.psychologist || state.balance < WELLNESS.psychHire) { sfx('error'); return }
+    setState(current => current && log({
+      ...current,
+      psychologist: true,
+      balance: current.balance - WELLNESS.psychHire,
+      expenses: current.expenses + WELLNESS.psychHire,
+      // quem já estava em burnout é atendido na hora
+      employees: current.employees.map(e => e.state === 'burnout' ? { ...e, state: 'idle', energy: 70, zeroes: 0 } : e),
+    }, 'Psicóloga contratada para a empresa.'))
+    sfx('win')
+    setToast('🧠 Psicóloga contratada! Equipe +15% produtiva e sem burnouts.')
+  }
+
+  function buyLounge() {
+    if (!state || state.lounge || state.balance < WELLNESS.loungePrice) { sfx('error'); return }
+    setState(current => current && log({
+      ...current,
+      lounge: true,
+      balance: current.balance - WELLNESS.loungePrice,
+      expenses: current.expenses + WELLNESS.loungePrice,
+    }, 'Sala de jogos e descanso inaugurada.'))
+    sfx('win')
+    setToast('🎮 Sala de jogos e descanso pronta! Quem estiver sem tarefa recupera energia.')
+  }
+
+  function startOver() {
+    deleteSave()
+    setState(null)
+    setScreen('menu')
+    setModal('setup')
   }
 
   function resetSave() {
@@ -350,18 +655,6 @@ function PixelApp() {
   return (
     <div className="pixel-app">
       <div className="pixel-stars" />
-      <header className="pixel-brandbar">
-        <button className="pixel-logo" onClick={() => setScreen('menu')} aria-label="Voltar ao menu">
-          <span className="growth">▁▃▆↗</span><b>Project <em>Tycoon</em></b>
-        </button>
-        {state && screen !== 'menu' && (
-          <div className="compact-hud">
-            <span>💵 {formatMoney(state.balance)}</span>
-            <span>⭐ {state.reputation} rep</span>
-            <span>📅 Dia {state.day}</span>
-          </div>
-        )}
-      </header>
 
       <main className="pixel-stage">
         {screen === 'menu' && (
@@ -379,10 +672,17 @@ function PixelApp() {
             onTeam={() => setModal('team')}
             onFinance={() => setModal('finance')}
             onMenu={() => setScreen('menu')}
+            onClaude={startMalware}
+            onTutor={() => setModal('tutor')}
+            onDiary={() => setModal('diary')}
+            onSale={() => setModal('sale')}
+            onElevator={() => setModal('elevator')}
+            onLounge={() => setScreen('lounge')}
           />
         )}
         {screen === 'contract' && (
           <MultiContractScreen
+            state={state}
             contracts={available}
             currentIndex={safeIndex}
             onSelectIndex={setContractIndex}
@@ -396,14 +696,30 @@ function PixelApp() {
         {screen === 'kanban' && (
           <NativeKanbanScene
             state={state}
-            project={project}
+            project={project && ['accepted', 'inprogress'].includes(project.status) ? project : undefined}
             completion={completion}
             onAssign={assignTask}
             onApprove={approveTask}
             onAdvance={advanceDay}
             onBack={() => setScreen('office')}
             onTeam={() => setModal('team')}
+            onContract={() => setScreen('contract')}
+            onJoker={callJoker}
+            onDeploy={deployNow}
+            onMalware={startMalware}
           />
+        )}
+        {screen === 'floor2' && state && (
+          <TeamFloorScene state={state} onTeam={() => setModal('team')} onKanban={() => setScreen('kanban')} onElevator={() => setModal('elevator')} />
+        )}
+        {screen === 'lounge' && state && (
+          <LoungeFloorScene state={state} onBuy={buyLounge} onBack={() => setScreen('office')} onTeam={() => setModal('team')} onKanban={() => setScreen('kanban')} />
+        )}
+        {screen === 'servers' && state && (
+          <ServerFloorScene state={state} onAccept={acceptHosting} onElevator={() => setModal('elevator')} />
+        )}
+        {screen === 'ending' && state?.ended && (
+          <EndingScreen state={state} onRestart={startOver} onMenu={() => setScreen('menu')} />
         )}
         {screen === 'results' && (
           <NativeResultsScene
@@ -448,8 +764,37 @@ function PixelApp() {
           onApprove={approveTask}
         />
       )}
-      {modal === 'team' && state && <TeamModal state={state} onClose={() => setModal(null)} onHire={hire} />}
-      {modal === 'finance' && state && <FinanceModal state={state} onClose={() => setModal(null)} />}
+      {modal === 'team' && state && <TeamModal state={state} onClose={() => setModal(null)} onHire={hire} onBonus={giveBonus} onTreat={treatBurnout} onPsychologist={hirePsychologist} />}
+      {modal === 'malware' && state && (
+        <PixelModal className="setup-modal malware-modal" title="Claude contra o malware" subtitle={`Nível ${Math.min(statsOf(state).malwareWins, 3) + 1} · vença para ganhar o coringa`} onClose={() => setModal(null)} wide>
+          <MalwareGame
+            onAttempt={() => setState(current => current && { ...current, jokerDay: current.day })}
+            level={statsOf(state).malwareWins}
+            onWin={flawless => setState(current => {
+              if (!current) return current
+              const won = bump({ ...current, jokers: 1 }, 'malwareWins')
+              return flawless ? bump(won, 'malwareFlawless') : won
+            })}
+            onClose={() => setModal(null)}
+          />
+        </PixelModal>
+      )}
+      {modal === 'tutor' && state && <TutorModal state={state} onFeed={feedTutor} onBuy={buyGpu} onUpgrade={upgradeOffice} onClose={() => setModal(null)} />}
+      {modal === 'elevator' && state && (
+        <ElevatorModal
+          state={state}
+          current={screen === 'floor2' ? 'team' : screen === 'servers' ? 'servers' : 'office'}
+          onRide={rideTo}
+          onBuy={buyFloor}
+          onClose={() => setModal(null)}
+        />
+      )}
+      {modal === 'event' && state && <EventModal state={state} onChoose={resolveEvent} />}
+      {modal === 'diary' && state && <DiaryModal state={state} onClose={() => setModal(null)} />}
+      {modal === 'sale' && state && (
+        <SaleModal state={state} onSell={sellCompany} onLater={() => { setState(current => current && { ...current, saleOfferSeen: true }); setModal(null) }} />
+      )}
+      {modal === 'finance' && state && <FinanceModal state={state} onLoan={takeLoan} onRepay={repayLoan} onClose={() => setModal(null)} />}
       {toast && <div className="pixel-toast">{toast}</div>}
       {state && screen === 'menu' && <button className="delete-save" onClick={resetSave}>Apagar save</button>}
     </div>
@@ -461,22 +806,8 @@ function PixelApp() {
    ========================================================================= */
 function NativeMenuScene({ hasSave, onNew, onContinue }: { hasSave: boolean; onNew: () => void; onContinue: () => void }) {
   return (
-    <div className="native-slide-container">
-      <header className="slide-top-header">
-        <span className="slide-badge">INÍCIO DA JORNADA</span>
-        <h1 className="slide-title">01 / Menu principal</h1>
-        <p className="slide-subtitle">A entrada para construir sua primeira empresa de software.</p>
-      </header>
-
-      <div className="slide-main-layout">
-        <section className="arcade-window">
-          <div className="arcade-titlebar">
-            <span className="titlebar-icon-sq" />
-            <span className="titlebar-text">Menu Principal</span>
-            <div className="titlebar-controls">🗕 🗖 🗙</div>
-          </div>
-
-          <div className="arcade-content-area menu-grid-content">
+    <section className="game-office game-menu" aria-label="Menu principal">
+          <div className="menu-grid-content">
             {/* Lado Esquerdo: UI Interativa Real de Clique */}
             <div className="menu-left-panel">
               <div className="menu-brand-title">
@@ -500,135 +831,10 @@ function NativeMenuScene({ hasSave, onNew, onContinue }: { hasSave: boolean; onN
 
             {/* Lado Direito: Ilustração Pixel Art Viva com Dev Respirando */}
             <div className="menu-dev-studio">
-              <svg viewBox="0 0 320 240" width="100%" height="100%" style={{ imageRendering: 'pixelated' }}>
-                {/* Céu noturno da janela */}
-                <rect x="180" y="20" width="120" height="110" fill="#0b0e28" rx="4" />
-                <circle cx="200" cy="40" r="1.5" fill="#fff" />
-                <circle cx="240" cy="35" r="1.5" fill="#63e8ff" />
-                <circle cx="280" cy="50" r="1.5" fill="#ffd166" />
-                {/* Lua suave */}
-                <circle cx="265" cy="45" r="12" fill="#ffd166" opacity="0.8" />
-                {/* Silhueta da cidade no horizonte */}
-                <rect x="185" y="65" width="25" height="65" fill="#141a4a" />
-                <rect x="215" y="55" width="30" height="75" fill="#1b2260" />
-                <rect x="250" y="70" width="22" height="60" fill="#141a4a" />
-                <rect x="275" y="60" width="22" height="70" fill="#1a205a" />
-                {/* Janelas iluminadas da cidade */}
-                <rect x="220" y="65" width="4" height="5" fill="#ffd166" />
-                <rect x="232" y="75" width="4" height="5" fill="#63e8ff" />
-                <rect x="220" y="85" width="4" height="5" fill="#ffd166" />
-                <rect x="282" y="75" width="4" height="5" fill="#ffd166" />
-
-                {/* Estante de livros com planta trepadeira */}
-                <rect x="110" y="30" width="60" height="8" fill="#50372b" />
-                <rect x="115" y="16" width="7" height="14" fill="#a855f7" />
-                <rect x="124" y="14" width="8" height="16" fill="#63e8ff" />
-                <rect x="134" y="18" width="6" height="12" fill="#4cf17c" />
-                {/* Vaso e folhas trepadeiras balançando */}
-                <rect x="146" y="20" width="14" height="10" fill="#2d1d15" rx="2" />
-                <path d="M148 30 Q144 45 142 55 Q138 65 140 75" stroke="#22c55e" strokeWidth="2.5" fill="none" />
-                <circle cx="144" cy="42" r="3" fill="#16a34a" />
-                <circle cx="140" cy="58" r="3.5" fill="#22c55e" />
-                <circle cx="142" cy="72" r="3" fill="#15803d" />
-
-                {/* Lâmpada de teto pendente */}
-                <line x1="165" y1="0" x2="165" y2="70" stroke="#778" strokeWidth="1.5" />
-                <polygon points="155,70 175,70 180,82 150,82" fill="#333855" />
-                <ellipse cx="165" cy="82" rx="15" ry="5" fill="#ffc75a" />
-                {/* Brilho de luz cônico */}
-                <polygon points="150,82 180,82 225,185 105,185" fill="url(#lampGradient)" opacity="0.3" />
-
-                {/* Mesa de Trabalho */}
-                <rect x="90" y="145" width="220" height="16" fill="#4a3020" rx="2" />
-                <rect x="105" y="161" width="12" height="79" fill="#2d1c12" />
-                <rect x="285" y="161" width="12" height="79" fill="#2d1c12" />
-
-                {/* Monitor Gamer / CRT */}
-                <rect x="195" y="98" width="70" height="48" fill="#1e2238" stroke="#3b426f" strokeWidth="2" rx="3" />
-                <rect x="200" y="103" width="60" height="38" fill="#0c1432" rx="2" />
-                <rect x="225" y="146" width="10" height="10" fill="#282d4a" />
-                <rect x="215" y="154" width="30" height="4" fill="#3b426f" rx="1" />
-                {/* Código rolando no monitor */}
-                <line x1="205" y1="110" x2="245" y2="110" stroke="#4cf17c" strokeWidth="2" />
-                <line x1="205" y1="116" x2="235" y2="116" stroke="#63e8ff" strokeWidth="2" />
-                <line x1="210" y1="122" x2="252" y2="122" stroke="#a855f7" strokeWidth="2" />
-                <line x1="205" y1="128" x2="225" y2="128" stroke="#ffd166" strokeWidth="2" />
-                <line x1="205" y1="134" x2="248" y2="134" stroke="#4cf17c" strokeWidth="2" />
-
-                {/* Teclado e Caneca na mesa */}
-                <rect x="185" y="148" width="45" height="5" fill="#2b314e" rx="1" />
-                <rect x="250" y="136" width="10" height="12" fill="#e2e8f0" rx="1" />
-                <rect x="260" y="139" width="3" height="6" fill="#cbd5e1" />
-                {/* Fumaça da caneca */}
-                <path d="M254 133 Q252 126 255 120 Q257 114 254 108" stroke="#fff" strokeWidth="1.2" fill="none" opacity="0.6" />
-
-                {/* Cadeira Gamer */}
-                <rect x="142" y="115" width="46" height="65" fill="#1b203c" stroke="#384070" strokeWidth="2" rx="6" />
-                <rect x="160" y="180" width="10" height="40" fill="#15192e" />
-                <line x1="145" y1="220" x2="185" y2="220" stroke="#252c4e" strokeWidth="4" />
-
-                {/* PERSONAGEM PROGRAMADOR RESPIRANDO */}
-                <g className="pixel-char-breathe">
-                  {/* Corpo / Blusa de Capuz Roxo */}
-                  <rect x="146" y="140" width="38" height="42" fill="#6d28d9" rx="5" />
-                  <rect x="156" y="142" width="18" height="38" fill="#5b21b6" />
-
-                  {/* Braço e Mãos Digitando */}
-                  <rect x="168" y="146" width="22" height="10" fill="#6d28d9" rx="3" />
-                  <g className="pixel-hands-typing">
-                    <rect x="188" y="147" width="8" height="7" fill="#fcd34d" rx="2" />
-                  </g>
-
-                  {/* Cabeça do Dev Respirando */}
-                  <g className="pixel-head-breathe">
-                    <circle cx="165" cy="125" r="14" fill="#fcd34d" />
-                    {/* Cabelo castanho espetado */}
-                    <path d="M151 125 C150 110 162 108 172 110 C180 112 181 120 178 128 C172 120 160 118 151 125 Z" fill="#451a03" />
-                    {/* Fone de Ouvido Gamer */}
-                    <rect x="160" y="115" width="5" height="12" fill="#06b6d4" rx="2" />
-                    <path d="M155 116 Q165 110 174 116" stroke="#06b6d4" strokeWidth="2.5" fill="none" />
-                  </g>
-                </g>
-
-                <defs>
-                  <linearGradient id="lampGradient" x1="0%" y1="0%" x2="0%" y2="100%">
-                    <stop offset="0%" stopColor="#ffc75a" stopOpacity="0.8" />
-                    <stop offset="100%" stopColor="#ffc75a" stopOpacity="0" />
-                  </linearGradient>
-                </defs>
-              </svg>
+              <MenuScene />
             </div>
           </div>
-        </section>
-
-        {/* 3 Cartões Laterais Idênticos aos Slides */}
-        <aside className="side-cards-column">
-          <div className="side-card purple">
-            <span className="side-card-tag">COMEÇAR</span>
-            <h3 className="side-card-title">Nova partida</h3>
-            <span className="side-card-sub">Crie sua software house do zero</span>
-          </div>
-
-          <div className="side-card cyan">
-            <span className="side-card-tag">CONTINUAR</span>
-            <h3 className="side-card-title">Retomar empresa</h3>
-            <span className="side-card-sub">Continue sua jornada empresarial</span>
-          </div>
-
-          <div className="side-card orange">
-            <span className="side-card-tag">IDENTIDADE</span>
-            <h3 className="side-card-title">Pixel art viva</h3>
-            <span className="side-card-sub">Simulador de gestão interativo</span>
-          </div>
-        </aside>
-      </div>
-
-      <footer className="slide-bottom-bar">
-        <span>PROJECT TYCOON</span>
-        <span>DEMONSTRAÇÃO · TELA 1</span>
-        <span>04 / 09</span>
-      </footer>
-    </div>
+    </section>
   )
 }
 
@@ -642,6 +848,12 @@ function NativeOfficeScene({
   onTeam,
   onFinance,
   onMenu,
+  onClaude,
+  onTutor,
+  onDiary,
+  onSale,
+  onElevator,
+  onLounge,
 }: {
   state: GameState | null
   onContract: () => void
@@ -649,184 +861,101 @@ function NativeOfficeScene({
   onTeam: () => void
   onFinance: () => void
   onMenu: () => void
+  onClaude: () => void
+  onTutor: () => void
+  onDiary: () => void
+  onSale: () => void
+  onElevator: () => void
+  onLounge: () => void
 }) {
   if (!state) return null
-  const hasContracts = state.availableContracts.length > 0
+  const contractCount = state.availableContracts.length
+  const teamSize = state.employees.length
+  const energy = teamSize ? Math.round(state.employees.reduce((sum, e) => sum + e.energy, 0) / teamSize) : 0
+  const dailyCost = dailyEmployeeCost(state)
+  const runway = dailyCost > 0 ? Math.max(0, Math.floor(state.balance / dailyCost)) : null
+  const cashLow = state.balance <= 0 || (runway !== null && runway < 15)
+  const activeProject = state.contracts.find(c => ['accepted', 'inprogress'].includes(c.status))
+  const progress = activeProject?.tasks.length
+    ? Math.round(activeProject.tasks.reduce((sum, t) => sum + t.progress, 0) / activeProject.tasks.length)
+    : 0
 
   return (
-    <div className="native-slide-container">
-      <header className="slide-top-header">
-        <span className="slide-badge">SEU CENTRO DE CONTROLE</span>
-        <h1 className="slide-title">02 / Escritório da empresa</h1>
-        <p className="slide-subtitle">Dinheiro, reputação, tempo e novas oportunidades em um só lugar.</p>
-      </header>
+    <section className="game-office game-office-room" aria-label={`Escritório de ${state.company}`}>
+            <div className="game-backdrop"><OfficeScene employees={state.employees.slice(0, officeOf(state).desks)} onHire={onTeam} desks={officeOf(state).desks} level={officeOf(state).level} onElevator={onElevator} /></div>
+            <div className="game-hud">
+              <HudCompany state={state} />
 
-      <div className="slide-main-layout">
-        <section className="arcade-window">
-          <div className="arcade-titlebar">
-            <span className="titlebar-icon-sq" />
-            <span className="titlebar-text">Escritório da Empresa · {state.company}</span>
-            <div className="titlebar-controls">🗕 🗖 🗙</div>
-          </div>
-
-          <div className="arcade-content-area office-grid-content">
-            {/* HUD Superior Nativo */}
-            <div className="office-native-hud">
-              <div className="office-hud-pill green">
-                <span>💲 {formatMoney(state.balance)}</span>
-                <small style={{ color: '#4cf17c', fontSize: 10 }}>+2.5% ▲</small>
-              </div>
-
-              <div className="office-hud-pill yellow">
-                <span>⭐ Reputação: {state.reputation}/100</span>
-              </div>
-
-              <div className="office-hud-pill">
-                <span>📅 Dia {state.day}</span>
-              </div>
-
-              {hasContracts && (
-                <button className="office-hud-contract-btn" onClick={onContract}>
-                  🏆 {state.availableContracts.length} novo(s) contrato(s)!
+              <div className="hud-resources">
+                <button className={`hud-chip ${cashLow ? 'danger' : 'green'}`} onClick={onFinance} title="Caixa: abrir finanças">
+                  <span className="hud-chip-icon" aria-hidden="true"><SpinningCoin /></span>
+                  <span className="hud-chip-body">
+                    <small>Caixa</small>
+                    <b key={state.balance} className="hud-bump">{formatMoney(state.balance)}</b>
+                    <small>{state.balance < 0 ? `Falência em ${daysToBankruptcy(state)}d` : runway === null ? 'Sem custo diário' : `Dura ${runway} ${runway === 1 ? 'dia' : 'dias'}`}</small>
+                  </span>
                 </button>
-              )}
-
-              <div className="office-hud-time">
-                <button className="btn-office-time" onClick={onKanban}>
-                  ▶ KANBAN
+                <button className="hud-chip purple" onClick={onTeam} title="Pessoas: abrir equipe">
+                  <span className="hud-chip-icon" aria-hidden="true"><PixelIcon name="people" /></span>
+                  <span className="hud-chip-body">
+                    <small>Pessoas</small>
+                    <b>{teamSize} no time</b>
+                    <span className={`hud-meter ${energy < 30 ? 'red' : 'cyan'}`}><i style={{ width: `${energy}%` }} /></span>
+                    <small>Energia {energy}%</small>
+                  </span>
+                </button>
+                <button className="hud-chip gem" onClick={onTutor} title="Placas de vídeo: abrir o tutor e a loja">
+                  <span className="hud-chip-icon" aria-hidden="true"><PixelIcon name="gpu" /></span>
+                  <span className="hud-chip-body">
+                    <small>Placas</small>
+                    <b>{gpusOf(state)} GPU</b>
+                    <small>{turboDaysLeft(state) > 0 ? `Turbo ${turboDaysLeft(state)}d` : 'Dar ao tutor'}</small>
+                  </span>
+                </button>
+                <button className="hud-chip orange" onClick={onContract} title="Clientes: ver contratos">
+                  <span className="hud-chip-icon" aria-hidden="true"><PixelIcon name="contract" /></span>
+                  <span className="hud-chip-body">
+                    <small>Clientes</small>
+                    <b>{contractCount} {contractCount === 1 ? 'contrato' : 'contratos'}</b>
+                    <small>{contractCount > 0 ? 'Disponíveis' : 'Nenhum no momento'}</small>
+                  </span>
                 </button>
               </div>
             </div>
 
-            {/* Sala Isométrica Dinâmica — 1 desk por funcionário contratado */}
-            <div className="office-isometric-canvas">
-              {(() => {
-                // 2 fileiras de 4 desks — organização isométrica em fileiras
-                const DESK_SLOTS = [
-                  // Fileira traseira (mais ao fundo)
-                  { tx: 100, ty: 118 },
-                  { tx: 185, ty:  88 },
-                  { tx: 272, ty:  88 },
-                  { tx: 357, ty: 118 },
-                  // Fileira frontal (mais próxima ao observador)
-                  { tx:  82, ty: 196 },
-                  { tx: 182, ty: 176 },
-                  { tx: 282, ty: 176 },
-                  { tx: 372, ty: 196 },
-                ]
-                const emps = state.employees
-                return (
-                  <svg viewBox="0 0 540 310" width="100%" height="100%" style={{ imageRendering: 'pixelated' }}>
-                    {/* Piso */}
-                    <polygon points="270,40 520,155 270,290 20,155" fill="#1b2252" stroke="#38438e" strokeWidth="2" />
-                    <line x1="270" y1="40" x2="270" y2="290" stroke="#272e72" strokeWidth="1" strokeDasharray="4 4" />
-                    <line x1="145" y1="98" x2="395" y2="218" stroke="#272e72" strokeWidth="1" strokeDasharray="4 4" />
-                    <line x1="395" y1="98" x2="145" y2="218" stroke="#272e72" strokeWidth="1" strokeDasharray="4 4" />
-                    {/* grade fina extra entre fileiras */}
-                    <line x1="80" y1="162" x2="400" y2="162" stroke="#2a3378" strokeWidth="0.8" strokeDasharray="6 5" opacity="0.6" />
-
-                    {/* Parede esquerda + janela de floresta */}
-                    <polygon points="20,155 270,40 270,10 20,115" fill="#121840" stroke="#37427e" strokeWidth="2" />
-                    <polygon points="38,140 252,38 252,16 38,116" fill="#0f3b32" stroke="#248066" strokeWidth="1.5" />
-                    {/* grade da janela */}
-                    <line x1="145" y1="27" x2="145" y2="128" stroke="#1a5e44" strokeWidth="1" />
-                    <line x1="38" y1="78" x2="252" y2="27" stroke="#1a5e44" strokeWidth="1" />
-                    <circle cx="88" cy="88" r="22" fill="#15803d" />
-                    <circle cx="136" cy="68" r="18" fill="#16a34a" />
-                    <circle cx="185" cy="52" r="20" fill="#22c55e" />
-
-                    {/* Parede direita + logo + quadro kanban */}
-                    <polygon points="270,40 520,155 520,115 270,10" fill="#161c50" stroke="#37427e" strokeWidth="2" />
-                    <rect x="306" y="34" width="96" height="32" fill="#0d1238" stroke="#63e8ff" strokeWidth="1.5" rx="3" />
-                    <text x="354" y="48" fill="#63e8ff" fontSize="6.5" fontWeight="bold" textAnchor="middle" fontFamily="monospace">◆ PROJECT TYCOON ◆</text>
-                    <text x="354" y="58" fill="#4a7af0" fontSize="5" textAnchor="middle" fontFamily="monospace">SOFTWARE HOUSE SIM</text>
-                    {/* Lousa de tarefas */}
-                    <rect x="414" y="68" width="82" height="48" fill="#e8ecf0" stroke="#64748b" strokeWidth="2" rx="2" />
-                    <text x="455" y="80" fill="#334155" fontSize="6" fontWeight="bold" textAnchor="middle" fontFamily="monospace">SPRINT BOARD</text>
-                    {['#ffc75a','#ff5277','#4cf17c','#63e8ff','#c084fc','#ffd166'].map((c, i) => (
-                      <rect key={i} x={420 + (i % 3) * 17} y={84 + Math.floor(i / 3) * 14} width="12" height="10" fill={c} rx="1" />
-                    ))}
-                    {/* Bebedouro + café */}
-                    <rect x="476" y="130" width="16" height="30" fill="#f8fafc" stroke="#94a3b8" strokeWidth="1" rx="2" />
-                    <circle cx="484" cy="124" r="8" fill="#60a5fa" opacity="0.85" />
-                    <circle cx="484" cy="126" r="2" fill="#fff" opacity="0.9" />
-                    <rect x="498" y="140" width="14" height="20" fill="#334155" rx="2" />
-                    <path d="M504 137 Q502 130 505 123" stroke="#fff" strokeWidth="1.2" fill="none" opacity="0.7" />
-
-                    {/* ===== DESKS DINÂMICOS EM 2 FILEIRAS ===== */}
-                    {DESK_SLOTS.map((slot, idx) => {
-                      const emp = emps[idx]
-                      const shirtColor  = emp ? ROLE_COLOR[emp.role]       : '#1e2a4a'
-                      const hairColor   = emp ? ROLE_HAIR[emp.role]        : '#334155'
-                      const codeColors  = emp ? ROLE_CODE_COLORS[emp.role] : ['#334155','#475569','#64748b']
-                      const isWorking   = emp?.state === 'working'
-                      const isLowEnergy = emp && emp.energy < 30
-                      const roleTxt     = emp ? ROLE_SHORT[emp.role] : ''
-                      return (
-                        <g key={idx} transform={`translate(${slot.tx}, ${slot.ty})`} className="office-desk-slot">
-                          {/* Mesa */}
-                          <rect x="24" y="16" width="46" height="22" fill="#3b2b20" stroke="#5d4332" strokeWidth="1.5" rx="2" />
-                          {/* Monitor */}
-                          <rect x="34" y="0" width="26" height="18" fill="#1c2838" stroke="#475569" strokeWidth="1" rx="2" />
-                          <rect x="36" y="2" width="22" height="14" fill={emp ? '#040d22' : '#0a0f20'} />
-                          {emp ? (
-                            <>
-                              <line x1="38" y1="6"  x2="56" y2="6"  stroke={codeColors[0]} strokeWidth="1.5" />
-                              <line x1="38" y1="10" x2="52" y2="10" stroke={codeColors[1]} strokeWidth="1.5" />
-                              <line x1="38" y1="14" x2="47" y2="14" stroke={codeColors[2]} strokeWidth="1" />
-                              <text x="47" y="9" fill="rgba(255,255,255,0.75)" fontSize="4" textAnchor="middle" fontFamily="monospace">{roleTxt}</text>
-                            </>
-                          ) : (
-                            <text x="47" y="11" fill="#2d3a6a" fontSize="7" textAnchor="middle" fontFamily="monospace">···</text>
-                          )}
-                          {/* Cadeira */}
-                          <rect x="1" y="11" width="20" height="27" fill="#181d38" rx="4" />
-
-                          {emp ? (
-                            <g className="pixel-char-breathe">
-                              <rect x="4" y="15" width="17" height="20" fill={shirtColor} rx="3" />
-                              <rect x="18" y="20" width="8" height="4" fill="#fcd34d" rx="1" />
-                              <g className="pixel-head-breathe">
-                                <circle cx="11" cy="9" r="8"  fill="#fcd34d" />
-                                <circle cx="11" cy="6" r="7"  fill={hairColor} />
-                                <circle cx="8.5"  cy="10" r="1" fill="#1e293b" />
-                                <circle cx="13.5" cy="10" r="1" fill="#1e293b" />
-                              </g>
-                              {isWorking && (
-                                <g>
-                                  <circle cx="22" cy="4" r="4.5" fill="#4cf17c" opacity="0.95" />
-                                  <text x="22" y="7" fill="#06200e" fontSize="5" textAnchor="middle">⚙</text>
-                                </g>
-                              )}
-                              {isLowEnergy && (
-                                <g>
-                                  <rect x="-2" y="4" width="10" height="6" fill="#ff5277" rx="2" />
-                                  <text x="3" y="9" fill="#fff" fontSize="4.5" textAnchor="middle">😩</text>
-                                </g>
-                              )}
-                            </g>
-                          ) : (
-                            <g className="office-empty-desk-badge">
-                              <rect x="2" y="12" width="17" height="23" fill="rgba(14,20,70,0.8)" stroke="#2a3480" strokeWidth="1" rx="4" strokeDasharray="3 2" />
-                              <text x="10" y="21" fill="#3a4890" fontSize="8" textAnchor="middle" fontFamily="monospace">+</text>
-                              <text x="10" y="29" fill="#3a4890" fontSize="4" textAnchor="middle" fontFamily="monospace">VAGA</text>
-                            </g>
-                          )}
-                          {emp && (
-                            <text x="47" y="43" fill="rgba(255,255,255,0.72)" fontSize="4.8" textAnchor="middle" fontFamily="monospace">
-                              {emp.name.split(' ')[0]}
-                            </text>
-                          )}
-                        </g>
-                      )
-                    })}
-                  </svg>
-                )
-              })()}
+            <div className="hud-quest-stack">
+              {(activeProject || contractCount > 0) && (
+                <button className="hud-quest" onClick={activeProject ? onKanban : onContract}>
+                  <small>❗ OBJETIVO ATUAL</small>
+                  <b>{activeProject ? activeProject.name : 'Feche um contrato'}</b>
+                  {activeProject ? (
+                    <>
+                      <span className="hud-meter green"><i style={{ width: `${progress}%` }} /></span>
+                      <small>{progress}% concluído</small>
+                    </>
+                  ) : (
+                    <small>Escolha um cliente ▶</small>
+                  )}
+                </button>
+              )}
+              {saleReady(state) ? (
+                <button className="hud-quest goal ready" onClick={onSale}>
+                  <small>🏆 META FINAL ATINGIDA</small>
+                  <b>Vender por {formatMoney(SALE_PRICE)}</b>
+                  <small>Abrir a proposta ▶</small>
+                </button>
+              ) : (
+                <div className="hud-quest goal">
+                  <small>🏆 META FINAL</small>
+                  <b>Faturar {formatMoney(SALE_REVENUE_GOAL)}</b>
+                  <span className="hud-meter gold"><i style={{ width: `${Math.min(100, state.revenue / SALE_REVENUE_GOAL * 100)}%` }} /></span>
+                  <small>{formatMoney(state.revenue)} · depois, vender por {formatMoney(SALE_PRICE)}</small>
+                </div>
+              )}
             </div>
 
             {/* Barra Inferior com Botões Reais Nativos Clicáveis */}
-            <nav className="office-bottom-nav">
+            <nav className="office-bottom-nav game-dock">
               <button className="btn-office-nav" onClick={onTeam}>
                 <span className="nav-icon-glyph">👥</span>
                 <span>Equipe</span>
@@ -843,41 +972,185 @@ function NativeOfficeScene({
                 <span className="nav-icon-glyph">💲</span>
                 <span>Finança</span>
               </button>
+              <button className={`btn-office-nav nav-claude ${canFightMalware(state) ? 'ready' : ''}`} onClick={onClaude}>
+                <span className="nav-icon-glyph"><ClaudeIcon /></span>
+                <span>{state.joker ? 'Trabalhando' : state.jokers ? 'Coringa pronto' : 'Coringa'}</span>
+              </button>
+              <button className={`btn-office-nav ${state.lounge ? '' : 'nav-new'}`} onClick={onLounge}>
+                <span className="nav-icon-glyph">🎮</span>
+                <span>Descanso</span>
+              </button>
+              <button className="btn-office-nav" onClick={onElevator}>
+                <span className="nav-icon-glyph">🛗</span>
+                <span>Elevador</span>
+              </button>
+              <button className="btn-office-nav" onClick={onDiary}>
+                <span className="nav-icon-glyph">📖</span>
+                <span>Diário</span>
+              </button>
               <button className="btn-office-nav" onClick={onMenu}>
                 <span className="nav-icon-glyph">‹</span>
                 <span>Menu</span>
               </button>
             </nav>
-          </div>
-        </section>
+    </section>
+  )
+}
 
-        {/* 3 Cartões Laterais Idênticos aos Slides */}
-        <aside className="side-cards-column">
-          <div className="side-card cyan">
-            <span className="side-card-tag">CAIXA</span>
-            <h3 className="side-card-title">{formatMoney(state.balance)}</h3>
-            <span className="side-card-sub">Controlar gastos operacionais</span>
-          </div>
+/* =========================================================================
+   2º ANDAR: MAIS MESAS PARA A EQUIPE
+   ========================================================================= */
+function TeamFloorScene({ state, onTeam, onKanban, onElevator }: { state: GameState; onTeam: () => void; onKanban: () => void; onElevator: () => void }) {
+  const firstFloor = officeOf(state).desks
+  const here = state.employees.slice(firstFloor, firstFloor + FLOORS.team.desks)
+  return (
+    <section className="game-office game-office-room floor-two" aria-label="2º andar">
+      <div className="game-backdrop">
+        <OfficeScene employees={here} onHire={onTeam} desks={FLOORS.team.desks} level={3} floor={2} walker={false} offset={firstFloor} onElevator={onElevator} />
+      </div>
+      <div className="game-hud">
+        <HudCompany state={state} />
+        <div className="hud-resources">
+          <button className="hud-chip purple" onClick={onTeam}>
+            <span className="hud-chip-icon" aria-hidden="true"><PixelIcon name="people" /></span>
+            <span className="hud-chip-body"><small>Neste andar</small><b>{here.length}/{FLOORS.team.desks}</b><small>{here.length ? 'mesas ocupadas' : 'Contrate mais gente'}</small></span>
+          </button>
+          <button className="hud-chip gem" onClick={onElevator}>
+            <span className="hud-chip-icon" aria-hidden="true"><PixelIcon name="office" /></span>
+            <span className="hud-chip-body"><small>2º andar</small><b>Elevador</b><small>Trocar de andar</small></span>
+          </button>
+        </div>
+      </div>
+      <nav className="office-bottom-nav game-dock floor-dock">
+        <button className="btn-office-nav" onClick={onTeam}><span className="nav-icon-glyph">👥</span><span>Equipe</span></button>
+        <button className="btn-office-nav" onClick={onKanban}><span className="nav-icon-glyph">📋</span><span>Projetos</span></button>
+        <button className="btn-office-nav" onClick={onElevator}><span className="nav-icon-glyph">🛗</span><span>Elevador</span></button>
+      </nav>
+    </section>
+  )
+}
 
-          <div className="side-card purple">
-            <span className="side-card-tag">PESSOAS</span>
-            <h3 className="side-card-title">{state.employees.length} no time</h3>
-            <span className="side-card-sub">Gerir energia e produtividade</span>
+/* =========================================================================
+   SALA DE JOGOS E DESCANSO (anexo ao lado do escritório)
+   ========================================================================= */
+function LoungeFloorScene({ state, onBuy, onBack, onTeam, onKanban }: { state: GameState; onBuy: () => void; onBack: () => void; onTeam: () => void; onKanban: () => void }) {
+  const resting = state.employees.map((employee, index) => ({ employee, index })).filter(({ employee }) => employee.state !== 'working')
+  const built = Boolean(state.lounge)
+  return (
+    <section className="game-office game-office-room lounge-room" aria-label="Sala de jogos e descanso">
+      <div className="game-backdrop"><LoungeScene people={resting} psychologist={Boolean(state.psychologist)} built={built} /></div>
+      <div className="game-hud">
+        <HudCompany state={state} />
+        <div className="hud-resources">
+          <div className="hud-chip purple">
+            <span className="hud-chip-icon" aria-hidden="true"><PixelIcon name="people" /></span>
+            <span className="hud-chip-body"><small>Descansando</small><b>{built ? resting.length : 0} aqui</b><small>{built ? `+${WELLNESS.restInLounge} energia/dia` : 'Sala fechada'}</small></span>
           </div>
+          <button className="hud-chip gem" onClick={onBack}>
+            <span className="hud-chip-icon" aria-hidden="true"><PixelIcon name="office" /></span>
+            <span className="hud-chip-body"><small>Voltar ao</small><b>Escritório</b><small>Sala ao lado</small></span>
+          </button>
+        </div>
+      </div>
+      {!built && (
+        <div className="lounge-build">
+          <h2>🚧 Sala de jogos e descanso</h2>
+          <p>Um anexo ao lado do escritório com videogame, pingue-pongue, fliperama e sofá.</p>
+          <ul>
+            <li>Durante os projetos, quem está sem tarefa recupera <b>+{WELLNESS.restInLounge}</b> de energia por dia (na mesa, só +{WELLNESS.restAtDesk}).</li>
+            <li>Ajuda a evitar o burnout: dá para revezar a equipe.</li>
+          </ul>
+          <button className="mission-accept setup-confirm" disabled={state.balance < WELLNESS.loungePrice} onClick={onBuy}>
+            {state.balance < WELLNESS.loungePrice ? `Caixa insuficiente · ${formatMoney(WELLNESS.loungePrice)}` : `Construir · ${formatMoney(WELLNESS.loungePrice)}`}
+          </button>
+        </div>
+      )}
+      <nav className="office-bottom-nav game-dock floor-dock">
+        <button className="btn-office-nav" onClick={onBack}><span className="nav-icon-glyph">🏢</span><span>Escritório</span></button>
+        <button className="btn-office-nav" onClick={onTeam}><span className="nav-icon-glyph">👥</span><span>Equipe</span></button>
+        <button className="btn-office-nav" onClick={onKanban}><span className="nav-icon-glyph">📋</span><span>Projetos</span></button>
+      </nav>
+    </section>
+  )
+}
 
-          <div className="side-card orange">
-            <span className="side-card-tag">CLIENTES</span>
-            <h3 className="side-card-title">{state.availableContracts.length} contratos</h3>
-            <span className="side-card-sub">Novas oportunidades no mercado</span>
+/* =========================================================================
+   3º ANDAR: SERVIDORES PARA ALUGAR
+   ========================================================================= */
+function ServerFloorScene({ state, onAccept, onElevator }: { state: GameState; onAccept: (id: string) => void; onElevator: () => void }) {
+  const used = racksInUse(state)
+  const total = FLOORS.servers.racks
+  const racks: RackView[] = (state.hosting ?? []).flatMap(deal => Array.from({ length: deal.racks }, () => ({ client: deal.client, daysLeft: hostingDaysLeft(deal, state.day) })))
+  while (racks.length < total) racks.push({ client: null, daysLeft: 0 })
+  return (
+    <section className="game-office game-servers" aria-label="Andar de servidores">
+      <div className="game-hud">
+        <HudCompany state={state} />
+        <div className="hud-resources">
+          <div className="hud-chip gem">
+            <span className="hud-chip-icon" aria-hidden="true"><PixelIcon name="gpu" /></span>
+            <span className="hud-chip-body"><small>Racks</small><b>{used}/{total}</b><small>{total - used} livres</small></span>
           </div>
+          <div className="hud-chip green">
+            <span className="hud-chip-icon" aria-hidden="true"><SpinningCoin /></span>
+            <span className="hud-chip-body"><small>Aluguel</small><b>{formatMoney(hostingIncome(state))}</b><small>por dia</small></span>
+          </div>
+          <button className="hud-chip purple" onClick={onElevator}>
+            <span className="hud-chip-icon" aria-hidden="true"><PixelIcon name="office" /></span>
+            <span className="hud-chip-body"><small>3º andar</small><b>Elevador</b><small>Trocar de andar</small></span>
+          </button>
+        </div>
+      </div>
+      <div className="srv-main">
+        <div className="srv-room"><ServerRoom racks={racks} onElevator={onElevator} /></div>
+        <aside className="srv-panel">
+          <section className="fin-panel">
+            <h3>Propostas de locação</h3>
+            {(state.hostingOffers ?? []).length === 0 && <small>Novas propostas chegam a cada 4 dias.</small>}
+            {(state.hostingOffers ?? []).map(deal => {
+              const fits = used + deal.racks <= total
+              return (
+                <div key={deal.id} className="srv-offer">
+                  <b>{deal.client}</b>
+                  <small>{deal.racks} rack{deal.racks > 1 ? 's' : ''} · {daysLabel(deal.days)} · total {formatMoney(deal.dailyRent * deal.days)}</small>
+                  <button className="mission-accept" disabled={!fits} onClick={() => onAccept(deal.id)}>
+                    {fits ? `Alugar · +${formatMoney(deal.dailyRent)}/dia` : 'Sem racks livres'}
+                  </button>
+                </div>
+              )
+            })}
+          </section>
+          <section className="fin-panel">
+            <h3>Clientes hospedados</h3>
+            {(state.hosting ?? []).length === 0 && <small>Nenhum rack alugado ainda.</small>}
+            {(state.hosting ?? []).map(deal => (
+              <div key={deal.id} className="fin-row">
+                <span>🖥 {deal.client} <small>({deal.racks} · faltam {daysLabel(hostingDaysLeft(deal, state.day))})</small></span>
+                <b className="fin-in">+{formatMoney(deal.dailyRent)}</b>
+              </div>
+            ))}
+          </section>
         </aside>
       </div>
+    </section>
+  )
+}
 
-      <footer className="slide-bottom-bar">
-        <span>PROJECT TYCOON</span>
-        <span>DEMONSTRAÇÃO · TELA 2</span>
-        <span>05 / 09</span>
-      </footer>
+function HudCompany({ state }: { state: GameState }) {
+  return (
+    <div className="hud-company">
+      <span className="hud-avatar" aria-hidden="true">{state.company.charAt(0).toUpperCase()}</span>
+      <div className="hud-company-info">
+        <b>{state.company}</b>
+        <span className="hud-meter gold"><i style={{ width: `${Math.min(100, Math.max(0, state.reputation))}%` }} /></span>
+        <small>⭐ {state.reputation}/100 reputação</small>
+      </div>
+      {turboDaysLeft(state) > 0 && (
+        <span className="hud-turbo" title="Tutor turbinado: tarefas andam o dobro e a equipe cansa menos">
+          <small>TURBO</small>{turboDaysLeft(state)}d
+        </span>
+      )}
+      <span className="hud-day"><small>DIA</small><span key={state.day} className="hud-bump">{state.day}</span></span>
     </div>
   )
 }
@@ -885,6 +1158,28 @@ function NativeOfficeScene({
 /* =========================================================================
    CENA NATIVA 04: QUADRO KANBAN REAL
    ========================================================================= */
+type Fit = 'ideal' | 'good' | 'basic'
+
+const FIT_LABEL: Record<Fit, string> = { ideal: '⭐ Ideal +35%', good: '⚡ Adaptado +15%', basic: '⚠️ Fora da área −25%' }
+const FIT_ORDER: Record<Fit, number> = { ideal: 0, good: 1, basic: 2 }
+
+function taskFit(role: Role, task: Task): Fit {
+  if (role === task.requiredRole) return 'ideal'
+  if (role === task.secondaryRole || (role === 'fullstack' && ['frontend', 'backend'].includes(task.requiredRole))) return 'good'
+  return 'basic'
+}
+
+function daysLabel(days: number) {
+  return `${days} ${days === 1 ? 'dia' : 'dias'}`
+}
+
+const BOARD: Array<{ id: Task['status']; title: string; empty: string }> = [
+  { id: 'todo', title: '📋 A fazer', empty: 'Tudo distribuído!' },
+  { id: 'inprogress', title: '⚙ Fazendo', empty: 'Ninguém produzindo' },
+  { id: 'review', title: '🔍 Validar', empty: 'Nada para validar' },
+  { id: 'done', title: '🏆 Pronto', empty: 'Nenhuma entrega ainda' },
+]
+
 function NativeKanbanScene({
   state,
   project,
@@ -894,6 +1189,10 @@ function NativeKanbanScene({
   onAdvance,
   onBack,
   onTeam,
+  onContract,
+  onJoker,
+  onMalware,
+  onDeploy,
 }: {
   state: GameState | null
   project?: Contract
@@ -903,267 +1202,240 @@ function NativeKanbanScene({
   onAdvance: () => void
   onBack: () => void
   onTeam: () => void
+  onContract: () => void
+  onJoker: (taskId: string) => void
+  onMalware: () => void
+  onDeploy: (taskId: string) => void
 }) {
-  if (!state || !project) {
-    return (
-      <div className="pixel-empty">
-        <h2>SEM PROJETO ATIVO</h2>
-        <p>Negocie ou aceite uma proposta no mercado para abrir o Kanban.</p>
-        <button onClick={onBack}>VOLTAR AO ESCRITÓRIO</button>
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  if (!state) return null
+
+  const hud = (
+    <div className="hud-resources">
+      <div className={`hud-chip ${state.balance <= 0 ? 'danger' : 'green'}`}>
+        <span className="hud-chip-icon" aria-hidden="true"><SpinningCoin /></span>
+        <span className="hud-chip-body"><small>Caixa</small><b key={state.balance} className="hud-bump">{formatMoney(state.balance)}</b></span>
       </div>
+      <button className="hud-chip purple" onClick={onBack}>
+        <span className="hud-chip-icon" aria-hidden="true"><PixelIcon name="office" /></span>
+        <span className="hud-chip-body"><small>Voltar ao</small><b>Escritório</b></span>
+      </button>
+    </div>
+  )
+
+  if (!project) {
+    return (
+      <section className="game-office" aria-label="Quadro do projeto">
+        <div className="game-hud"><HudCompany state={state} />{hud}</div>
+        <div className="pixel-empty">
+          <h2>Sem projeto ativo</h2>
+          <p>Aceite uma proposta para abrir o quadro, ou espere novas propostas no mercado.</p>
+          <div className="empty-actions">
+            <button onClick={onContract}>Ver contratos</button>
+            <button onClick={onAdvance}>⏭ Esperar um dia</button>
+          </div>
+        </div>
+      </section>
     )
   }
 
-  const columns: Array<{ id: Task['status']; title: string; count: number; colorClass: string }> = [
-    { id: 'todo', title: 'A Fazer (Backlog)', count: project.tasks.filter(t => t.status === 'todo').length, colorClass: 'todo' },
-    { id: 'inprogress', title: 'Em Desenvolvimento', count: project.tasks.filter(t => t.status === 'inprogress').length, colorClass: 'inprogress' },
-    { id: 'review', title: 'Em Testes / QA', count: project.tasks.filter(t => t.status === 'review').length, colorClass: 'review' },
-    { id: 'done', title: 'Concluído', count: project.tasks.filter(t => t.status === 'done').length, colorClass: 'done' },
-  ]
+  const tasks = project.tasks
+  const unlocked = (task: Task) => taskDependenciesDone(task, tasks)
+  const jobOf = (id: string) => tasks.find(t => t.status === 'inprogress' && t.assignedTo === id)
+  const toReview = tasks.filter(t => t.status === 'review')
+  const toAssign = tasks.filter(t => t.status === 'todo' && unlocked(t))
+  const free = state.employees.filter(e => !jobOf(e.id) && e.state !== 'working' && e.state !== 'burnout')
+  const working = tasks.filter(t => t.status === 'inprogress')
+  const daysLeft = contractDaysRemaining(project, state.day)
+  const suggested = toReview[0] ?? (free.length ? toAssign[0] : undefined) ?? working[0] ?? toAssign[0] ?? tasks[0]
+  const selected = tasks.find(t => t.id === selectedId) ?? suggested
+  const allDone = tasks.every(t => t.status === 'done')
 
-  const availableDevs = state.employees.filter(emp => !project.tasks.some(t => t.status === 'inprogress' && t.assignedTo === emp.id))
+  const step = allDone
+    ? { text: 'Projeto entregue! Volte ao escritório.', target: null }
+    : toReview.length
+      ? { text: `Valide: ${toReview[0].name}`, target: toReview[0].id }
+      : toAssign.length && free.length
+        ? { text: `Escolha quem faz: ${toAssign[0].name}`, target: toAssign[0].id }
+        : { text: working.length ? 'Equipe produzindo: avance o dia' : 'Contrate alguém para continuar', target: null }
+  const shouldAdvance = !allDone && !step.target && working.length > 0
+
+  // Tarefas liberadas aparecem antes das bloqueadas
+  const inColumn = (status: Task['status']) => tasks
+    .filter(t => t.status === status)
+    .sort((x, y) => Number(unlocked(y)) - Number(unlocked(x)))
+
+  const worker = staffOf(state).find(e => e.id === selected?.assignedTo)
+  const candidates = selected
+    ? [...state.employees].sort((x, y) =>
+        Number(!free.includes(x)) - Number(!free.includes(y))
+        || FIT_ORDER[taskFit(x.role, selected)] - FIT_ORDER[taskFit(y.role, selected)])
+    : []
+  const etaFor = (employee: GameState['employees'][number], task: Task) =>
+    daysLabel(Math.max(1, Math.ceil((100 - task.progress) / Math.max(1, calculateTaskGain(employee, task, state.difficulty) * (turboDaysLeft(state) > 0 ? 2 : 1)))))
+  const faceOf = (id: string) => state.employees.findIndex(e => e.id === id)
 
   return (
-    <div className="native-slide-container">
-      <header className="slide-top-header">
-        <span className="slide-badge">GESTÃO NA PRÁTICA</span>
-        <h1 className="slide-title">04 / Quadro Kanban</h1>
-        <p className="slide-subtitle">O jogador enxerga o fluxo de trabalho e decide o que acontece em seguida.</p>
-      </header>
-
-      <div className="slide-main-layout">
-        <section className="arcade-window">
-          <div className="arcade-titlebar">
-            <span className="titlebar-icon-sq" />
-            <span className="titlebar-text">Gerenciamento do Projeto (Kanban)</span>
-            <div className="titlebar-controls">🗕 🗖 🗙</div>
+    <section className="game-office game-kanban" aria-label="Quadro do projeto">
+      <div className="game-hud">
+        <HudCompany state={state} />
+        <div className="hud-company kb-project">
+          <div className="kb-project-info">
+            <b>{project.name}</b>
+            <span className="hud-meter green"><i style={{ width: `${completion}%` }} /></span>
+            <small>{completion}% concluído</small>
           </div>
-
-          <div className="arcade-content-area kanban-grid-content">
-            {/* Topo do Kanban com Progresso */}
-            <div className="kanban-top-info">
-              <div className="kanban-project-name">
-                <span>📁 {project.name}</span>
-                <small style={{ color: '#9ea8eb', fontSize: 11 }}>({project.client})</small>
-              </div>
-
-              <div className="kanban-progress-wrapper">
-                <span style={{ font: '700 13px Pixelify Sans', color: 'white' }}>Progresso: {completion}%</span>
-                <div className="kanban-progress-bar-bg">
-                  <div className="kanban-progress-fill" style={{ width: `${completion}%` }} />
-                </div>
-              </div>
-            </div>
-
-            {/* As 4 Colunas com Cartões Reais Clicáveis */}
-            <div className="kanban-board-columns">
-              {columns.map(col => (
-                <div key={col.id} className={`kanban-col ${col.colorClass}`}>
-                  <div className="kanban-col-head">
-                    <span>{col.title}</span>
-                    <span>({col.count})</span>
-                  </div>
-
-                  <div className="kanban-cards-list">
-                    {project.tasks.filter(t => t.status === col.id).map(task => {
-                      const unlocked = taskDependenciesDone(task, project.tasks)
-                      const assignedDev = state.employees.find(e => e.id === task.assignedTo)
-
-                      // Calcula sinergia de cada dev disponível
-                      const getSynergy = (devRole: Role) => {
-                        if (devRole === task.requiredRole) return { label: '⭐ Ideal (+35% vel)', cls: 'ideal' }
-                        if ((task.secondaryRole && devRole === task.secondaryRole) || (devRole === 'fullstack' && ['frontend','backend'].includes(task.requiredRole))) {
-                          return { label: '⚡ Adaptado (+15%)', cls: 'good' }
-                        }
-                        return { label: '⚠️ Básico', cls: 'basic' }
-                      }
-
-                      // Sinergia do dev já alocado
-                      const devSynergy = assignedDev ? getSynergy(assignedDev.role) : null
-
-                      return (
-                        <article key={task.id} className="kanban-card">
-                          {/* Cabeçalho com nome da tarefa + chip de tecnologia */}
-                          <div className="kanban-card-header">
-                            <h4 className="kanban-card-title">{task.name}</h4>
-                            {task.technology && (
-                              <span className="kanban-tech-chip">🔧 {task.technology}</span>
-                            )}
-                          </div>
-
-                          {/* Papel e complexidade */}
-                          <div className="kanban-role-guide">
-                            <span className="role-ideal">
-                              ✦ Ideal: {ROLE_LABEL[task.requiredRole]}
-                            </span>
-                            {task.secondaryRole && (
-                              <span className="role-alt">
-                                ↝ Alternativo: {ROLE_LABEL[task.secondaryRole]}
-                              </span>
-                            )}
-                          </div>
-
-                          {/* Complexidade */}
-                          <p className="kanban-task-desc">
-                            Complexidade: <b style={{ color: task.complexity >= 8 ? '#ff5277' : task.complexity >= 6 ? '#facc15' : '#4cf17c' }}>{task.complexity} pts</b>
-                            {task.estimatedDays && <span style={{ color: '#94a3b8' }}> · ~{task.estimatedDays} dias</span>}
-                          </p>
-
-                          {/* Alocação */}
-                          {task.status === 'todo' && (
-                            <>
-                              {unlocked ? (
-                                <div className="kanban-assign-box">
-                                  <span className="kanban-assign-label">👤 Alocar desenvolvedor:</span>
-                                  <select
-                                    className="kanban-dev-select"
-                                    defaultValue=""
-                                    onChange={e => e.target.value && onAssign(task.id, e.target.value)}
-                                  >
-                                    <option value="" disabled>— Escolher profissional —</option>
-                                    {availableDevs.map(d => {
-                                      const syn = getSynergy(d.role)
-                                      return (
-                                        <option key={d.id} value={d.id}>
-                                          {syn.label} {d.name} · {ROLE_SHORT[d.role]}
-                                        </option>
-                                      )
-                                    })}
-                                  </select>
-                                </div>
-                              ) : (
-                                <div className="kanban-locked-notice">
-                                  🔒 Aguardando tarefas anteriores serem concluídas antes de desbloquear.
-                                </div>
-                              )}
-                            </>
-                          )}
-
-                          {/* Em progresso */}
-                          {task.status === 'inprogress' && assignedDev && (
-                            <div className="kanban-working-box">
-                              <div className="kanban-worker-info">
-                                <div
-                                  className="kanban-worker-avatar"
-                                  style={{ background: ROLE_COLOR[assignedDev.role] }}
-                                >
-                                  {assignedDev.name.split(' ').map(p => p[0]).slice(0,2).join('')}
-                                </div>
-                                <div className="kanban-worker-text">
-                                  <span className="kanban-worker-name">⚙ {assignedDev.name}</span>
-                                  {devSynergy && (
-                                    <span className={`kanban-synergy-pill ${devSynergy.cls}`}>{devSynergy.label}</span>
-                                  )}
-                                </div>
-                              </div>
-                              <div className="kanban-progress-track">
-                                <div className="kanban-progress-fill-card" style={{ width: `${task.progress}%` }} />
-                              </div>
-                              <div className="kanban-progress-labels">
-                                <span>Progresso</span>
-                                <b>{task.progress}%</b>
-                              </div>
-                            </div>
-                          )}
-
-                          {/* Em revisão */}
-                          {task.status === 'review' && (
-                            <div className="kanban-review-box">
-                              <span className="review-badge">✓ Tarefa pronta para validação!</span>
-                              <button className="btn-approve-task" onClick={() => onApprove(task.id)}>
-                                ✔ VALIDAR TAREFA
-                              </button>
-                            </div>
-                          )}
-
-                          {/* Concluída */}
-                          {task.status === 'done' && (
-                            <div className="kanban-done-box">
-                              <span className="done-check">✓ Entregue com sucesso</span>
-                              <span className="done-quality">Qualidade: <b>{task.quality}%</b></span>
-                            </div>
-                          )}
-                        </article>
-                      )
-                    })}
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            {/* Rodapé do Kanban com Personagens Respirando e Botão Avançar Dia */}
-            <div className="kanban-bottom-bar">
-              <div className="kanban-team-row">
-                <button
-                  style={{ padding: '6px 12px', background: '#1c2468', border: '1.5px solid #63e8ff', color: 'white', borderRadius: 6, font: '700 11px Pixelify Sans' }}
-                  onClick={onBack}
-                >
-                  ‹ ESCRITÓRIO
-                </button>
-
-                {state.employees.map(dev => {
-                  const isWorking = project.tasks.some(t => t.status === 'inprogress' && t.assignedTo === dev.id)
-                  return (
-                    <div
-                      key={dev.id}
-                      className={`kanban-dev-avatar-box ${isWorking ? 'busy' : ''}`}
-                      title={`${dev.name} · ${ROLE_LABEL[dev.role]}${isWorking ? ' (trabalhando)' : ' (livre)'}`}
-                      style={{ borderColor: isWorking ? ROLE_COLOR[dev.role] : undefined }}
-                    >
-                      <svg viewBox="0 0 32 32" width="28" height="28" className="pixel-char-breathe">
-                        <circle cx="16" cy="13" r="7" fill="#fcd34d" />
-                        <circle cx="16" cy="10" r="6" fill={ROLE_HAIR[dev.role]} />
-                        <rect x="8" y="19" width="16" height="12" fill={ROLE_COLOR[dev.role]} rx="2" />
-                        {isWorking && <circle cx="26" cy="6" r="4" fill="#4cf17c" />}
-                      </svg>
-                    </div>
-                  )
-                })}
-
-                <button
-                  style={{ width: 32, height: 32, borderRadius: 6, background: '#252e7a', border: '1.5px solid #555eb3', color: 'white', font: '800 16px Pixelify Sans' }}
-                  onClick={onTeam}
-                  title="Contratar profissional"
-                >
-                  +
-                </button>
-              </div>
-
-              <button className="btn-kanban-advance-day" onClick={onAdvance}>
-                ▶▶ Avançar Dia (Dia {state.day})
-              </button>
-            </div>
-          </div>
-        </section>
-
-        {/* 3 Cartões Laterais Idênticos aos Slides */}
-        <aside className="side-cards-column">
-          <div className="side-card cyan">
-            <span className="side-card-tag">1 • PRIORIZAR</span>
-            <h3 className="side-card-title">O que vem primeiro?</h3>
-            <span className="side-card-sub">Respeite as dependências de cada entrega</span>
-          </div>
-
-          <div className="side-card orange">
-            <span className="side-card-tag">2 • DISTRIBUIR</span>
-            <h3 className="side-card-title">Quem faz cada tarefa?</h3>
-            <span className="side-card-sub">Aloque os devs pela especialidade certa</span>
-          </div>
-
-          <div className="side-card green">
-            <span className="side-card-tag">3 • VALIDAR</span>
-            <h3 className="side-card-title">O que está pronto?</h3>
-            <span className="side-card-sub">Revise e certifique a qualidade final</span>
-          </div>
-        </aside>
+          <span className={`hud-day ${daysLeft < 5 ? 'late' : ''}`}><small>{daysLeft < 0 ? 'ATRASO' : 'RESTAM'}</small>{Math.abs(daysLeft)}d</span>
+        </div>
+        {hud}
       </div>
 
-      <footer className="slide-bottom-bar">
-        <span>PROJECT TYCOON</span>
-        <span>DEMONSTRAÇÃO · TELA 4</span>
-        <span>07 / 09</span>
+      <div className="kb-main">
+        <div className="kb-board">
+          {BOARD.map(col => {
+            const list = inColumn(col.id)
+            return (
+              <section key={col.id} className={`kb-col ${col.id}`} aria-label={`${col.title}: ${list.length}`}>
+                <header><span>{col.title}</span><b>{list.length}</b></header>
+                <div className="kb-list">
+                  {list.length === 0 && <p className="kb-none">{col.empty}</p>}
+                  {list.map(task => {
+                    const open = task.status !== 'todo' || unlocked(task)
+                    const dev = staffOf(state).find(e => e.id === task.assignedTo)
+                    return (
+                      <button
+                        key={task.id}
+                        className={`kb-card ${open ? '' : 'locked'} ${task.status === 'review' ? 'ready' : ''}`}
+                        aria-pressed={selected?.id === task.id}
+                        onClick={() => setSelectedId(task.id)}
+                      >
+                        <b>{open ? '' : '🔒 '}{task.name}</b>
+                        {task.status === 'todo' && <small>{ROLE_LABEL[task.requiredRole]} · {task.complexity} pts</small>}
+                        {task.status === 'inprogress' && (
+                          <>
+                            <small>{dev?.name.split(' ')[0]} · {task.progress}%</small>
+                            <span className="hud-meter cyan"><i style={{ width: `${task.progress}%` }} /></span>
+                          </>
+                        )}
+                        {task.status === 'review' && <small>Pronta para validar</small>}
+                        {task.status === 'done' && <small>Qualidade {task.quality}%</small>}
+                      </button>
+                    )
+                  })}
+                </div>
+              </section>
+            )
+          })}
+        </div>
+
+        {selected && (
+          <aside className="kb-sheet" aria-label="Tarefa selecionada" key={selected.id}>
+            <div className="kb-sheet-scroll">
+              <h2>{selected.name}</h2>
+              <div className="mission-tech">
+                {selected.technology && <span>{selected.technology}</span>}
+                <span>{selected.complexity} pts</span>
+                <span>~{daysLabel(selected.estimatedDays)}</span>
+              </div>
+              <p className="kb-roles">
+                ⭐ {ROLE_LABEL[selected.requiredRole]}
+                {selected.secondaryRole && <> · ⚡ {ROLE_LABEL[selected.secondaryRole]}</>}
+              </p>
+
+              {selected.status === 'todo' && !unlocked(selected) && (
+                <div className="kb-block">
+                  <h3>🔒 Conclua antes</h3>
+                  {tasks.filter(t => selected.dependsOn.includes(t.id) && t.status !== 'done').map(t => (
+                    <button key={t.id} className="kb-dep" onClick={() => setSelectedId(t.id)}>{t.name} ▶</button>
+                  ))}
+                </div>
+              )}
+
+              {selected.status === 'todo' && unlocked(selected) && (
+                <div className="kb-block">
+                  <h3>Quem vai fazer?</h3>
+                  {candidates.map(dev => {
+                    const fit = taskFit(dev.role, selected)
+                    const isFree = free.includes(dev)
+                    return (
+                      <button key={dev.id} className={`kb-dev ${fit}`} disabled={!isFree} onClick={() => { onAssign(selected.id, dev.id); setSelectedId(null) }}>
+                        <Portrait name={dev.name} index={faceOf(dev.id)} color={ROLE_COLOR[dev.role]} />
+                        <span>
+                          <b>{dev.name}</b>
+                          <small>{ROLE_LABEL[dev.role]} · ⚡{dev.energy}%</small>
+                          <small className="kb-fit">{isFree ? `${FIT_LABEL[fit]} · ${etaFor(dev, selected)}` : dev.state === 'burnout' ? '🔥 Em burnout' : 'Ocupado em outra tarefa'}</small>
+                        </span>
+                      </button>
+                    )
+                  })}
+                  <button className="kb-dep" onClick={onTeam}>+ Contratar profissional</button>
+                </div>
+              )}
+
+              {selected.status !== 'todo' && worker && (
+                <div className="kb-block">
+                  <h3>{selected.status === 'inprogress' ? 'Trabalhando nisso' : 'Feita por'}</h3>
+                  <div className={`kb-dev ${taskFit(worker.role, selected)}`}>
+                    <Portrait name={worker.name} index={faceOf(worker.id)} color={ROLE_COLOR[worker.role]} />
+                    <span>
+                      <b>{worker.name}</b>
+                      <small>{worker.id === state.joker?.id ? 'Coringa' : `${ROLE_LABEL[worker.role]} · ⚡${worker.energy}%`}</small>
+                      <small className="kb-fit">{worker.id === state.joker?.id ? `Sem custo · qualidade ${worker.quality}%` : FIT_LABEL[taskFit(worker.role, selected)]}</small>
+                    </span>
+                  </div>
+                </div>
+              )}
+              {selected.status === 'inprogress' && (
+                <div className="kb-block">
+                  <span className="hud-meter cyan"><i style={{ width: `${selected.progress}%` }} /></span>
+                  <small>{selected.progress}%{worker && ` · faltam cerca de ${etaFor(worker, selected)}`}</small>
+                </div>
+              )}
+              {(selected.status === 'todo' || selected.status === 'inprogress') && unlocked(selected) && !state.joker && (
+                <div className="kb-block">
+                  {state.jokers ? (
+                    <button className="kb-dev joker" onClick={() => { onJoker(selected.id); setSelectedId(null) }}>
+                      <Portrait name="Claude" index={-1} color="" />
+                      <span>
+                        <b>{selected.status === 'todo' ? 'Usar o coringa Claude' : `Claude no lugar de ${worker?.name.split(' ')[0] ?? 'quem faz'}`}</b>
+                        <small className="kb-fit">Rápido e sem custo · qualidade {jokerQuality(state, selected)}%</small>
+                      </span>
+                    </button>
+                  ) : canFightMalware(state) && (
+                    <button className="kb-dep joker" onClick={onMalware}>🕹 Ganhar o coringa Claude</button>
+                  )}
+                </div>
+              )}
+              {selected.status === 'inprogress' && gpusOf(state) > 0 && (
+                <button className="kb-dep gpu" onClick={() => onDeploy(selected.id)}>⚡ Deploy instantâneo · 1 placa de vídeo ({gpusOf(state)})</button>
+              )}
+              {selected.status === 'done' && <p className="kb-roles">🏆 Entregue com {selected.quality}% de qualidade</p>}
+            </div>
+            {selected.status === 'review' && (
+              <button className="mission-accept kb-approve" onClick={() => { onApprove(selected.id); setSelectedId(null) }}>✓ Validar tarefa</button>
+            )}
+          </aside>
+        )}
+      </div>
+
+      <footer className="kb-dock">
+        <button className="kb-team" onClick={onTeam} aria-label={`Abrir equipe: ${free.length} livres de ${state.employees.length}`}>
+          {state.employees.slice(0, 5).map((dev, index) => (
+            <span key={dev.id} className={free.includes(dev) ? 'kb-face' : 'kb-face busy'} title={`${dev.name}: ${free.includes(dev) ? 'livre' : 'ocupado'}`}>
+              <Portrait name={dev.name} index={index} color={ROLE_COLOR[dev.role]} />
+            </span>
+          ))}
+          <small>{state.employees.length > 5 && `+${state.employees.length - 5} · `}{free.length} livre(s)</small>
+        </button>
+
+        <button className="kb-step" disabled={!step.target} onClick={() => setSelectedId(step.target)}>
+          <small>❗ PRÓXIMO PASSO</small>
+          <b>{step.text}</b>
+        </button>
+
+        <button className={`mission-accept kb-advance ${shouldAdvance ? 'pulse' : ''}`} onClick={onAdvance}>▶▶ Avançar dia</button>
       </footer>
-    </div>
+    </section>
   )
 }
 
@@ -1195,93 +1467,26 @@ function NativeResultsScene({
   const gradeColor = quality >= 85 ? '#4cf17c' : quality >= 70 ? '#63e8ff' : quality >= 55 ? '#ffd166' : '#ff5277'
 
   return (
-    <div className="native-slide-container results-completion-bg">
-      <header className="slide-top-header">
-        <span className="slide-badge">🎉 PROJETO CONCLUÍDO</span>
-        <h1 className="slide-title">05 / Relatório de Entrega</h1>
-        <p className="slide-subtitle">
-          {settlement?.projectName ?? project?.name} · Cliente: {settlement?.clientName ?? project?.client}
-        </p>
-      </header>
-
-      <div className="slide-main-layout">
-        <section className="arcade-window">
-          <div className="arcade-titlebar">
-            <span className="titlebar-icon-sq" />
-            <span className="titlebar-text">Relatório Final do Projeto</span>
-            <div className="titlebar-controls">🗕 🗖 🗙</div>
+    <section className="game-office game-results" aria-label="Relatório de entrega">
+      <div className="game-hud">
+        {state && <HudCompany state={state} />}
+        <div className="hud-company kb-project">
+          <div className="kb-project-info">
+            <b>🎉 {settlement?.projectName ?? project?.name}</b>
+            <small>Entregue para {settlement?.clientName ?? project?.client}</small>
           </div>
-
-          <div className="arcade-content-area results-grid-content">
+          <span className="hud-day"><small>NOTA</small>{grade}</span>
+        </div>
+      </div>
+          <div className="results-grid-content">
             {/* Banner comemorativo com devs celebrando */}
             <div className="results-banner-delivered">
               {/* Equipe comemorando — SVG animado */}
-              <svg viewBox="0 0 200 90" width="180" height="80" style={{ imageRendering: 'pixelated', flexShrink: 0 }}>
-                {/* Fogos de artifício */}
-                {[40, 100, 160].map((cx, i) => (
-                  <g key={i}>
-                    <circle cx={cx} cy="18" r="2" fill={['#ffd166','#4cf17c','#ff5277'][i]} opacity="0.9" />
-                    {[0,60,120,180,240,300].map((ang, j) => (
-                      <line key={j}
-                        x1={cx} y1="18"
-                        x2={cx + Math.cos(ang * Math.PI / 180) * 10}
-                        y2={18  + Math.sin(ang * Math.PI / 180) * 10}
-                        stroke={['#ffd166','#4cf17c','#ff5277'][i]}
-                        strokeWidth="1.5" opacity="0.8" />
-                    ))}
-                  </g>
-                ))}
-
-                {/* Dev 1 — braço levantado */}
-                <g className="pixel-char-breathe" transform="translate(14, 28)">
-                  <rect x="4" y="18" width="18" height="22" fill="#10b981" rx="3" />
-                  <rect x="20" y="4" width="8" height="18" fill="#10b981" rx="3" />
-                  <circle cx="27" cy="2" r="4" fill="#fcd34d" />
-                  <g className="pixel-head-breathe">
-                    <circle cx="12" cy="10" r="8" fill="#fcd34d" />
-                    <circle cx="12" cy="7"  r="7" fill="#78350f" />
-                    <circle cx="9.5" cy="11" r="1.2" fill="#1e293b" />
-                    <circle cx="14.5" cy="11" r="1.2" fill="#1e293b" />
-                    <path d="M9 14 Q12 17 15 14" stroke="#1e293b" strokeWidth="1.2" fill="none" />
-                  </g>
-                </g>
-
-                {/* Dev 2 — central com troféu */}
-                <g className="pixel-char-breathe" transform="translate(80, 22)">
-                  <rect x="3" y="18" width="18" height="22" fill="#2563eb" rx="3" />
-                  <rect x="-4" y="8" width="8" height="16" fill="#2563eb" rx="3" />
-                  <circle cx="-1" cy="6" r="4" fill="#fcd34d" />
-                  {/* troféu */}
-                  <rect x="17" y="5" width="10" height="8" fill="#ffd166" rx="2" />
-                  <rect x="20" y="12" width="4" height="4" fill="#ffd166" />
-                  <rect x="18" y="15" width="8" height="2" fill="#ffd166" />
-                  <g className="pixel-head-breathe">
-                    <circle cx="12" cy="10" r="8" fill="#fcd34d" />
-                    <circle cx="12" cy="7"  r="7" fill="#0f172a" />
-                    <circle cx="9.5" cy="11" r="1.2" fill="#1e293b" />
-                    <circle cx="14.5" cy="11" r="1.2" fill="#1e293b" />
-                    <path d="M9 14 Q12 17 15 14" stroke="#1e293b" strokeWidth="1.2" fill="none" />
-                  </g>
-                </g>
-
-                {/* Dev 3 */}
-                <g className="pixel-char-breathe" transform="translate(152, 28)">
-                  <rect x="2" y="18" width="18" height="22" fill="#ec4899" rx="3" />
-                  <rect x="17" y="4" width="8" height="18" fill="#ec4899" rx="3" />
-                  <circle cx="21" cy="2" r="4" fill="#fcd34d" />
-                  <g className="pixel-head-breathe">
-                    <circle cx="10" cy="10" r="8" fill="#fcd34d" />
-                    <circle cx="10" cy="7"  r="7" fill="#d97706" />
-                    <circle cx="7.5" cy="11" r="1.2" fill="#1e293b" />
-                    <circle cx="12.5" cy="11" r="1.2" fill="#1e293b" />
-                    <path d="M7 14 Q10 17 13 14" stroke="#1e293b" strokeWidth="1.2" fill="none" />
-                  </g>
-                </g>
-              </svg>
+              <div className="results-victory"><VictoryScene /></div>
 
               {/* Nota / Grade */}
               <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
-                <div style={{ width: 60, height: 60, borderRadius: '50%', background: gradeColor, color: '#060f28', font: '900 32px Pixelify Sans', display: 'grid', placeItems: 'center', boxShadow: `0 0 24px ${gradeColor}99` }}>
+                <div style={{ width: 60, height: 60, background: gradeColor, color: '#060f28', font: '900 32px Pixelify Sans', display: 'grid', placeItems: 'center', boxShadow: `0 0 24px ${gradeColor}99` }}>
                   {grade}
                 </div>
                 <span style={{ font: '700 10px Pixelify Sans', color: gradeColor }}>NOTA FINAL</span>
@@ -1376,43 +1581,15 @@ function NativeResultsScene({
               🏢 Voltar ao Escritório →
             </button>
           </div>
-        </section>
-
-        {/* Cartões laterais dinâmicos */}
-        <aside className="side-cards-column">
-          <div className={`side-card ${grade === 'S' || grade === 'A' ? 'green' : grade === 'B' ? 'orange' : 'purple'}`}>
-            <span className="side-card-tag">NOTA {grade}</span>
-            <h3 className="side-card-title">{quality}% qualidade</h3>
-            <span className="side-card-sub">{quality >= 80 ? 'Código impecável' : quality >= 60 ? 'Qualidade adequada' : 'Dívida técnica alta'}</span>
-          </div>
-
-          <div className={`side-card ${wasLate ? 'orange' : 'cyan'}`}>
-            <span className="side-card-tag">PRAZO</span>
-            <h3 className="side-card-title">{wasLate ? `${lateDays}d atraso` : `${earlyDays}d adiantado`}</h3>
-            <span className="side-card-sub">{wasLate ? 'Multa aplicada ao pagamento' : 'Bônus de pontualidade!'}</span>
-          </div>
-
-          <div className={`side-card ${reputationDelta >= 5 ? 'green' : reputationDelta >= 0 ? 'purple' : 'orange'}`}>
-            <span className="side-card-tag">REPUTAÇÃO</span>
-            <h3 className="side-card-title">{reputationDelta >= 0 ? '+' : ''}{reputationDelta} pts</h3>
-            <span className="side-card-sub">Total: {state?.reputation ?? 0} / 100</span>
-          </div>
-        </aside>
-      </div>
-
-      <footer className="slide-bottom-bar">
-        <span>PROJECT TYCOON</span>
-        <span>RELATÓRIO FINAL · {settlement?.projectName ?? 'PROJETO'}</span>
-        <span>05 / 09</span>
-      </footer>
-    </div>
+    </section>
   )
 }
 
 /* =========================================================================
-   CENA NATIVA 03: MULTI-CONTRATOS (SEGUINDO O DESIGN DE SLIDE)
+   CENA NATIVA 03: MURAL DE CONTRATOS
    ========================================================================= */
 interface MultiContractScreenProps {
+  state: GameState | null
   contracts: Contract[]
   currentIndex: number
   onSelectIndex: (idx: number) => void
@@ -1424,6 +1601,7 @@ interface MultiContractScreenProps {
 }
 
 function MultiContractScreen({
+  state,
   contracts,
   currentIndex,
   onSelectIndex,
@@ -1436,327 +1614,154 @@ function MultiContractScreen({
   const current = contracts[currentIndex]
   const hasActiveProject = Boolean(project && ['accepted', 'inprogress'].includes(project.status))
 
+  if (!state) return null
+  const complexity = current?.complexity ?? 'medium'
+  const stars = complexity === 'easy' ? 1 : complexity === 'hard' ? 3 : 2
+  const complexityLabel = complexity === 'easy' ? 'Inicial' : complexity === 'hard' ? 'Avançada' : 'Média'
+
   return (
-    <div className="native-slide-container">
-      <header className="slide-top-header">
-        <span className="slide-badge">PRIMEIRO DESAFIO</span>
-        <h1 className="slide-title">03 / Clientes & Contratos</h1>
-        <p className="slide-subtitle">Avalie propostas do mercado, analise o escopo e feche o melhor negócio.</p>
-      </header>
-
-      {/* Barra de Navegação entre Contratos */}
-      {contracts.length > 0 && (
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#141a54', padding: '8px 16px', borderRadius: 10, border: '2px solid #5863c4' }}>
-          <button
-            style={{ padding: '6px 14px', background: '#1e2675', border: '1.5px solid #63e8ff', color: 'white', borderRadius: 6, font: '700 12px Pixelify Sans' }}
-            disabled={currentIndex === 0}
-            onClick={() => onSelectIndex(Math.max(0, currentIndex - 1))}
-          >
-            ◀ ANTERIOR
+    <section className="game-office game-contracts" aria-label="Mural de contratos">
+      <div className="game-hud">
+        <HudCompany state={state} />
+        <div className="hud-resources">
+          <div className="hud-chip green">
+            <span className="hud-chip-icon" aria-hidden="true"><SpinningCoin /></span>
+            <span className="hud-chip-body"><small>Caixa</small><b key={state.balance} className="hud-bump">{formatMoney(state.balance)}</b></span>
+          </div>
+          <button className="hud-chip purple" onClick={onBack}>
+            <span className="hud-chip-icon" aria-hidden="true"><PixelIcon name="office" /></span>
+            <span className="hud-chip-body"><small>Voltar ao</small><b>Escritório</b></span>
           </button>
+        </div>
+      </div>
 
-          <div style={{ display: 'flex', gap: 6 }}>
+      <div className="contract-arena">
+        {contracts.length > 0 && (
+          <nav className="contract-list" aria-label="Propostas disponíveis">
             {contracts.map((c, i) => (
               <button
                 key={c.id}
-                style={{
-                  width: 32, height: 28, borderRadius: 5, font: '700 12px Pixelify Sans',
-                  background: i === currentIndex ? '#782cf0' : '#141b4e',
-                  border: i === currentIndex ? '2px solid #bd74ff' : '1px solid #4a54b8',
-                  color: 'white',
-                }}
+                className={`contract-ticket ${i === currentIndex ? 'active' : ''}`}
+                aria-pressed={i === currentIndex}
                 onClick={() => onSelectIndex(i)}
               >
-                0{i + 1}
+                <span className="contract-ticket-art" aria-hidden="true"><BuildingScene type={c.buildingType} /></span>
+                <span className="contract-ticket-body">
+                  <small>{c.client}</small>
+                  <b>{c.name}</b>
+                  <small className="contract-ticket-pay">{formatMoney(c.value)}</small>
+                </span>
               </button>
             ))}
-          </div>
+          </nav>
+        )}
 
-          <button
-            style={{ padding: '6px 14px', background: '#1e2675', border: '1.5px solid #63e8ff', color: 'white', borderRadius: 6, font: '700 12px Pixelify Sans' }}
-            disabled={currentIndex >= contracts.length - 1}
-            onClick={() => onSelectIndex(Math.min(contracts.length - 1, currentIndex + 1))}
-          >
-            PRÓXIMO ▶
-          </button>
+        <div className="contract-mission" key={current?.id}>
+          {hasActiveProject && (
+            <div className="signed-overlay">
+              <span>✓ PROJETO ATIVO EM ANDAMENTO</span>
+              <b>{project?.name} · {formatMoney(project?.value ?? 0)} · {project?.deadlineDays} dias</b>
+              <button onClick={onKanban}>ABRIR QUADRO KANBAN</button>
+            </div>
+          )}
+
+          {current ? (
+            <>
+              <div className="mission-scroll">
+                <header className="mission-head">
+                  <span className="mission-art" aria-hidden="true"><BuildingScene type={current.buildingType} /></span>
+                  <div>
+                    <small>❗ MISSÃO DE {current.client.toUpperCase()}</small>
+                    <h2>{current.name}</h2>
+                    <span className={`mission-stars ${complexity}`}>
+                      <span aria-hidden="true">{'★'.repeat(stars)}{'☆'.repeat(3 - stars)}</span> {complexityLabel}
+                    </span>
+                  </div>
+                </header>
+
+                <div className="mission-stats">
+                  <div className="green"><small>💰 Recompensa</small><b>{formatMoney(current.value)}</b><small>Bônus rápido +{formatMoney(current.bonusEarly)}</small></div>
+                  <div className="orange"><small>⏳ Prazo</small><b>{current.deadlineDays} dias</b><small>Multa {formatMoney(current.penaltyPerDay)}/dia</small></div>
+                  <div className="purple"><small>📦 Escopo</small><b>{current.features} entregas</b><small>Qualidade mínima {current.minQuality}%</small></div>
+                </div>
+
+                <h3>Objetivos</h3>
+                <ul className="mission-goals">
+                  {(current.featureList || current.technicalReqs).map((req, idx) => <li key={idx}>{req}</li>)}
+                </ul>
+
+                <div className="mission-tech">
+                  <small>Tecnologias</small>
+                  {current.technicalReqs.map(t => <span key={t}>{t}</span>)}
+                </div>
+              </div>
+
+              <div className="mission-actions">
+                <button className="mission-negotiate" disabled={hasActiveProject} onClick={() => onNegotiate(current)}>🤝 Negociar</button>
+                <button className="mission-accept" disabled={hasActiveProject} onClick={() => onAccept(current)}>{hasActiveProject ? 'Termine o projeto atual' : '✓ Aceitar contrato'}</button>
+              </div>
+            </>
+          ) : (
+            <div className="pixel-empty">
+              <h2>SEM PROPOSTAS</h2>
+              <button onClick={onBack}>VOLTAR AO ESCRITÓRIO</button>
+            </div>
+          )}
         </div>
-      )}
-
-      <div className="slide-main-layout">
-        <section className="arcade-window">
-          <div className="arcade-titlebar">
-            <span className="titlebar-icon-sq" />
-            <span className="titlebar-text">Proposta 0{currentIndex + 1} · {current?.client ?? 'Mercado'}</span>
-            <div className="titlebar-controls">🗕 🗖 🗙</div>
-          </div>
-
-          <div className="arcade-content-area" style={{ padding: 24, background: '#101443', position: 'relative' }}>
-            {hasActiveProject && (
-              <div className="signed-overlay">
-                <span>✓ PROJETO ATIVO EM ANDAMENTO</span>
-                <b>{project?.name} · {formatMoney(project?.value ?? 0)} · {project?.deadlineDays} dias</b>
-                <button onClick={onKanban}>ABRIR QUADRO KANBAN</button>
-              </div>
-            )}
-
-            {current ? (
-              <div style={{ display: 'flex', flexDirection: 'column', width: '100%', gap: 16 }}>
-                <div style={{ display: 'grid', gridTemplateColumns: '170px 1fr', gap: 20 }}>
-                  {/* Prédio Pixel Art do Contrato */}
-                  <div style={{ width: '100%', aspectRatio: '1/1', background: '#161d56', border: '2px solid #5863c4', borderRadius: 10, display: 'grid', placeItems: 'center' }}>
-                    <BuildingArt type={current.buildingType} />
-                  </div>
-
-                  {/* Informações do Contrato */}
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                      <h2 style={{ margin: 0, font: '800 clamp(18px, 2.2vw, 28px) Pixelify Sans', color: 'white' }}>{current.name}</h2>
-                      <span style={{ padding: '3px 8px', background: '#4cf17c', color: '#072212', borderRadius: 6, font: '800 11px Pixelify Sans' }}>Novo contrato</span>
-                    </div>
-
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', padding: 8, background: '#151c5a', borderRadius: 6, border: '1px solid #4a54b8' }}>
-                      <div>
-                        <span style={{ fontSize: 11, color: '#aeb4db' }}>Valor</span>
-                        <div style={{ font: '800 18px Pixelify Sans', color: '#4cf17c' }}>{formatMoney(current.value)}</div>
-                      </div>
-                      <div>
-                        <span style={{ fontSize: 11, color: '#aeb4db' }}>Prazo</span>
-                        <div style={{ font: '800 18px Pixelify Sans', color: 'white' }}>{current.deadlineDays} dias</div>
-                      </div>
-                      <div>
-                        <span style={{ fontSize: 11, color: '#aeb4db' }}>Dificuldade</span>
-                        <div style={{ font: '800 18px Pixelify Sans', color: current.complexity === 'easy' ? '#4cf17c' : current.complexity === 'hard' ? '#ff5277' : '#ffd166' }}>
-                          {current.complexity === 'easy' ? 'Inicial' : current.complexity === 'hard' ? 'Avançada' : 'Média'}
-                        </div>
-                      </div>
-                    </div>
-
-                    <div>
-                      <h4 style={{ margin: '4px 0 6px', font: '700 13px Pixelify Sans', color: 'white' }}>Requisitos Solicitados:</h4>
-                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
-                        {(current.featureList || current.technicalReqs).map((req, idx) => (
-                          <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#d8dbfa' }}>
-                            <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#a855f7' }} />
-                            <span>{req}</span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-
-                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4 }}>
-                      {current.technicalReqs.map(t => (
-                        <span key={t} style={{ padding: '2px 8px', background: '#1e2870', border: '1px solid #5863c4', borderRadius: 4, fontSize: 11, color: '#63e8ff' }}>#{t}</span>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.3fr', gap: 14, marginTop: 'auto', paddingTop: 10 }}>
-                  <button
-                    style={{ padding: 12, background: '#1c2468', border: '2px solid #63e8ff', color: 'white', borderRadius: 8, font: '700 14px Pixelify Sans' }}
-                    onClick={() => onNegotiate(current)}
-                  >
-                    🤝 NEGOCIAR CONDIÇÕES
-                  </button>
-                  <button
-                    style={{ padding: 12, background: 'linear-gradient(180deg, #4ef27e, #30d762)', border: '2px solid #7eff9e', color: '#072212', borderRadius: 8, font: '800 16px Pixelify Sans' }}
-                    onClick={() => onAccept(current)}
-                  >
-                    ✓ Aceitar contrato
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <div className="pixel-empty">
-                <h2>SEM PROPOSTAS</h2>
-                <button onClick={onBack}>VOLTAR AO ESCRITÓRIO</button>
-              </div>
-            )}
-          </div>
-        </section>
-
-        {/* 3 Cartões Laterais Idênticos aos Slides */}
-        <aside className="side-cards-column">
-          <div className="side-card cyan">
-            <span className="side-card-tag">VALOR</span>
-            <h3 className="side-card-title">{current ? formatMoney(current.value) : '—'}</h3>
-            <span className="side-card-sub">Bônus rápido: +{formatMoney(current?.bonusEarly ?? 0)}</span>
-          </div>
-
-          <div className="side-card orange">
-            <span className="side-card-tag">PRAZO</span>
-            <h3 className="side-card-title">{current ? `${current.deadlineDays} dias` : '—'}</h3>
-            <span className="side-card-sub">Multa: {formatMoney(current?.penaltyPerDay ?? 0)}/dia</span>
-          </div>
-
-          <div className="side-card purple">
-            <span className="side-card-tag">REQUISITOS</span>
-            <h3 className="side-card-title">{current?.features ?? 5} entregas</h3>
-            <span className="side-card-sub">Mínimo de qualidade: {current?.minQuality ?? 70}%</span>
-          </div>
-        </aside>
       </div>
-
-      <footer className="slide-bottom-bar">
-        <span>PROJECT TYCOON</span>
-        <span>DEMONSTRAÇÃO · TELA 3</span>
-        <span>06 / 09</span>
-      </footer>
-    </div>
+    </section>
   )
-}
-
-function BuildingArt({ type }: { type?: string }) {
-  switch (type) {
-    case 'delivery':
-      return (
-        <svg viewBox="0 0 160 160" width="100%" height="100%">
-          <rect width="160" height="160" fill="#13194a" rx="8" />
-          <rect x="30" y="45" width="75" height="90" fill="#2a3382" stroke="#505ab8" strokeWidth="2" />
-          <rect x="35" y="48" width="65" height="14" fill="#ff4d6d" rx="2" />
-          <text x="67" y="59" fill="#fff" fontSize="8" fontWeight="bold" textAnchor="middle" fontFamily="sans-serif">DELIVERY</text>
-          <rect x="38" y="70" width="12" height="14" fill="#ffd166" />
-          <rect x="58" y="70" width="12" height="14" fill="#ffd166" />
-          <rect x="78" y="70" width="12" height="14" fill="#ffd166" />
-          <rect x="110" y="125" width="26" height="12" fill="#ff4d6d" rx="2" />
-          <circle cx="114" cy="138" r="5" fill="#0d102e" stroke="#667" strokeWidth="2" />
-          <circle cx="132" cy="138" r="5" fill="#0d102e" stroke="#667" strokeWidth="2" />
-        </svg>
-      )
-    case 'ead':
-      return (
-        <svg viewBox="0 0 160 160" width="100%" height="100%">
-          <rect width="160" height="160" fill="#101744" rx="8" />
-          <rect x="35" y="45" width="90" height="92" fill="#242c75" stroke="#6875d9" strokeWidth="2" />
-          <rect x="42" y="52" width="76" height="12" fill="#7928ca" rx="2" />
-          <text x="80" y="61" fill="#fff" fontSize="8" fontWeight="bold" textAnchor="middle" fontFamily="sans-serif">EDUCA ACADEMY</text>
-          <rect x="45" y="72" width="20" height="24" fill="#63e8ff" />
-          <rect x="72" y="72" width="20" height="24" fill="#ffd166" />
-          <rect x="98" y="72" width="20" height="24" fill="#63e8ff" />
-        </svg>
-      )
-    case 'fintech':
-      return (
-        <svg viewBox="0 0 160 160" width="100%" height="100%">
-          <rect width="160" height="160" fill="#0a0e2a" rx="8" />
-          <rect x="42" y="24" width="76" height="116" fill="#131c54" stroke="#485ee8" strokeWidth="2" />
-          <rect x="50" y="28" width="60" height="16" fill="#00b4d8" rx="2" />
-          <text x="80" y="39" fill="#03045e" fontSize="9" fontWeight="900" textAnchor="middle" fontFamily="sans-serif">◆ NEOBANK</text>
-          <rect x="52" y="52" width="12" height="8" fill="#4cf17c" />
-          <rect x="74" y="52" width="12" height="8" fill="#63e8ff" />
-          <rect x="96" y="52" width="12" height="8" fill="#4cf17c" />
-          <rect x="52" y="72" width="12" height="8" fill="#63e8ff" />
-          <rect x="74" y="72" width="12" height="8" fill="#4cf17c" />
-          <rect x="96" y="72" width="12" height="8" fill="#63e8ff" />
-        </svg>
-      )
-    case 'health':
-      return (
-        <svg viewBox="0 0 160 160" width="100%" height="100%">
-          <rect width="160" height="160" fill="#0d143d" rx="8" />
-          <rect x="30" y="38" width="98" height="102" fill="#1d286d" stroke="#5263d9" strokeWidth="2" />
-          <rect x="68" y="44" width="24" height="24" fill="#0e1642" rx="4" />
-          <rect x="77" y="48" width="6" height="16" fill="#4cf17c" />
-          <rect x="72" y="53" width="16" height="6" fill="#4cf17c" />
-          <rect x="40" y="76" width="16" height="16" fill="#63e8ff" />
-          <rect x="64" y="76" width="16" height="16" fill="#ffd166" />
-          <rect x="88" y="76" width="16" height="16" fill="#63e8ff" />
-        </svg>
-      )
-    default:
-      return (
-        <svg viewBox="0 0 160 160" width="100%" height="100%">
-          <rect width="160" height="160" fill="#101443" rx="8" />
-          <rect x="36" y="36" width="86" height="104" fill="#2b358a" stroke="#5d69db" strokeWidth="2" />
-          <rect x="48" y="46" width="16" height="18" fill="#ffd166" />
-          <rect x="74" y="46" width="16" height="18" fill="#ffd166" />
-          <rect x="96" y="46" width="16" height="18" fill="#ffd166" />
-          <rect x="48" y="72" width="16" height="18" fill="#ffd166" />
-          <rect x="74" y="72" width="16" height="18" fill="#ffd166" />
-          <rect x="96" y="72" width="16" height="18" fill="#ffd166" />
-        </svg>
-      )
-  }
 }
 
 /* =========================================================================
    MODAIS NATIVOS
    ========================================================================= */
-function PixelModal({ title, subtitle, children, onClose, wide = false }: { title: string; subtitle?: string; children: React.ReactNode; onClose: () => void; wide?: boolean }) {
-  return (
-    <div className="modal-backdrop" role="dialog" aria-modal="true">
-      <section className={`pixel-modal ${wide ? 'wide' : ''}`}>
-        <header>
-          <span className="pixel-square" />
-          <div>
-            <h2>{title}</h2>
-            {subtitle && <p>{subtitle}</p>}
-          </div>
-          <button onClick={onClose} aria-label="Fechar">×</button>
-        </header>
-        <div className="modal-body">{children}</div>
-      </section>
-    </div>
-  )
-}
 
 function SetupModal(props: { company: string; founder: string; difficulty: Difficulty; onCompany: (value: string) => void; onFounder: (value: string) => void; onDifficulty: (value: Difficulty) => void; onClose: () => void; onConfirm: () => void }) {
-  const diffLabels: Record<Difficulty, { title: string; capital: string; desc: string }> = {
-    easy: { title: 'FÁCIL', capital: 'R$ 32.000', desc: 'Maior capital & clientes tolerantes' },
-    normal: { title: 'NORMAL', capital: 'R$ 24.000', desc: 'Desafio equilibrado e realista' },
-    hard: { title: 'DIFÍCIL', capital: 'R$ 18.000', desc: 'Menor margem & clientes exigentes' },
+  const levels: Record<Difficulty, { title: string; capital: string; desc: string; stars: number; hue: number }> = {
+    easy: { title: 'Fácil', capital: 'R$ 32.000', desc: 'Maior capital e clientes tolerantes', stars: 1, hue: -110 },
+    normal: { title: 'Normal', capital: 'R$ 24.000', desc: 'Desafio equilibrado e realista', stars: 2, hue: 0 },
+    hard: { title: 'Difícil', capital: 'R$ 18.000', desc: 'Menor margem e clientes exigentes', stars: 3, hue: 110 },
   }
+  const level = levels[props.difficulty]
 
   return (
-    <PixelModal title="NOVA EMPRESA · FUNDAÇÃO" subtitle="Defina sua identidade e nível de desafio para começar." onClose={props.onClose}>
-      <div style={{ display: 'grid', gridTemplateColumns: '90px 1fr', gap: 16, alignItems: 'center', background: '#12184c', padding: 12, borderRadius: 10, border: '1.5px solid #4a54b8' }}>
-        <div style={{ width: 80, height: 80, background: '#192264', borderRadius: 8, display: 'grid', placeItems: 'center', border: '2px solid #63e8ff' }}>
-          <svg viewBox="0 0 32 32" width="60" height="60" className="pixel-char-breathe">
-            <circle cx="16" cy="14" r="8" fill="#fcd34d" />
-            <circle cx="16" cy="11" r="7" fill="#451a03" />
-            <rect x="7" y="22" width="18" height="10" fill="#6d28d9" rx="3" />
-          </svg>
+    <PixelModal className="setup-modal" title="Nova empresa" subtitle="Defina sua identidade e nível de desafio para começar." onClose={props.onClose}>
+      <form className="setup-grid" onSubmit={event => { event.preventDefault(); props.onConfirm() }}>
+        <div className="setup-scene">
+          <FoundingScene hue={level.hue} />
+          <b className="setup-sign">{props.company.trim() || 'Sua empresa'}</b>
+          <div className="setup-plate">
+            <small>Fundada por</small>
+            <b>{props.founder.trim() || 'Você'}</b>
+          </div>
         </div>
-        <div>
-          <h3 style={{ margin: 0, font: '800 18px Pixelify Sans', color: 'white' }}>{props.company || 'Sua Software House'}</h3>
-          <p style={{ margin: '3px 0 0', color: '#9ea8eb', fontSize: 12 }}>Fundada por: {props.founder || 'Você'}</p>
+
+        <div className="setup-fields">
+          <label>Nome da empresa
+            <input value={props.company} onChange={event => props.onCompany(event.target.value)} placeholder="Ex.: Pixel Forge" />
+          </label>
+          <label>Nome do fundador
+            <input value={props.founder} onChange={event => props.onFounder(event.target.value)} placeholder="Seu nome" />
+          </label>
+
+          <div role="group" aria-label="Nível de dificuldade">
+            <span className="setup-label">Nível de dificuldade</span>
+            <div className="setup-levels">
+              {(['easy', 'normal', 'hard'] as Difficulty[]).map(item => (
+                <button key={item} type="button" className={`setup-level ${item}`} aria-pressed={props.difficulty === item} onClick={() => props.onDifficulty(item)}>
+                  <span className="setup-stars" aria-hidden="true">{'★'.repeat(levels[item].stars)}{'☆'.repeat(3 - levels[item].stars)}</span>
+                  <b>{levels[item].title}</b>
+                  <small>{levels[item].capital}</small>
+                </button>
+              ))}
+            </div>
+            <p className="setup-desc">{level.desc}</p>
+          </div>
+
+          <button type="submit" className="mission-accept setup-confirm">▶ Fundar empresa</button>
         </div>
-      </div>
-
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
-        <label>Nome da empresa
-          <input value={props.company} onChange={event => props.onCompany(event.target.value)} placeholder="Ex.: Pixel Forge" />
-        </label>
-        <label>Nome do fundador
-          <input value={props.founder} onChange={event => props.onFounder(event.target.value)} placeholder="Seu nome" />
-        </label>
-      </div>
-
-      <div>
-        <label style={{ marginBottom: 6 }}>Nível de Dificuldade</label>
-        <div className="pixel-choice">
-          {(['easy', 'normal', 'hard'] as Difficulty[]).map(item => (
-            <button
-              key={item}
-              type="button"
-              className={props.difficulty === item ? 'selected' : ''}
-              onClick={() => props.onDifficulty(item)}
-            >
-              <span>{diffLabels[item].title}</span>
-              <small style={{ color: props.difficulty === item ? '#4cf17c' : '#9ea8eb', fontSize: 11, fontWeight: 700 }}>
-                {diffLabels[item].capital}
-              </small>
-            </button>
-          ))}
-        </div>
-        <p style={{ margin: '6px 0 0', fontSize: 11, color: '#8c95cf', textAlign: 'center' }}>
-          {diffLabels[props.difficulty].desc}
-        </p>
-      </div>
-
-      <button className="pixel-primary" onClick={props.onConfirm}>
-        ▶ FUNDAR EMPRESA
-      </button>
+      </form>
     </PixelModal>
   )
 }
@@ -1764,9 +1769,10 @@ function SetupModal(props: { company: string; founder: string; difficulty: Diffi
 function NegotiationModal(props: { contract: Contract; value: number; deadline: number; message: string; onValue: (value: number) => void; onDeadline: (value: number) => void; onClose: () => void; onSend: () => void }) {
   const rejected = props.contract.status === 'rejected' || props.message.startsWith('Recusada')
   return (
-    <PixelModal title={rejected ? 'RENEGOCIAR CONTRATO' : 'NEGOCIAR CONTRATO'} subtitle={`Cliente: ${props.contract.client}`} onClose={props.onClose}>
+    <PixelModal className="setup-modal negotiation-modal" title={rejected ? 'Renegociar contrato' : 'Negociar contrato'} subtitle={`${props.contract.name} · ${props.contract.client}`} onClose={props.onClose}>
       <div className="client-message">
-        <span>CLIENTE · {props.contract.client.toUpperCase()}</span>
+        <span className="client-face" aria-hidden="true"><BuildingScene type={props.contract.buildingType} /></span>
+        <span>{props.contract.client}</span>
         <p>{rejected ? 'A oferta anterior não foi aprovada pela diretoria. Envie uma contraproposta mais alinhada.' : 'Estamos abertos a ouvir sua proposta comercial, considerando orçamento e prazo.'}</p>
       </div>
       {props.message && (
@@ -1775,7 +1781,7 @@ function NegotiationModal(props: { contract: Contract; value: number; deadline: 
         </div>
       )}
       <div className="offer-grid">
-        <label>VALOR DA PROPOSTA
+        <label>Valor da proposta
           <input
             type="number"
             min={Math.floor(props.contract.originalValue * 0.7)}
@@ -1785,7 +1791,7 @@ function NegotiationModal(props: { contract: Contract; value: number; deadline: 
             onChange={event => props.onValue(Number(event.target.value))}
           />
         </label>
-        <label>PRAZO EM DIAS
+        <label>Prazo em dias
           <input
             type="number"
             min={Math.floor(props.contract.originalDeadlineDays * 0.6)}
@@ -1796,11 +1802,11 @@ function NegotiationModal(props: { contract: Contract; value: number; deadline: 
         </label>
       </div>
       <div className="offer-preview">
-        <span>SUA OFERTA</span>
+        <span>Sua oferta · original {formatMoney(props.contract.originalValue)} em {props.contract.originalDeadlineDays} dias</span>
         <b>{formatMoney(props.value)} · {props.deadline} dias</b>
       </div>
-      <button className="pixel-primary" onClick={props.onSend}>
-        🤝 {rejected ? 'ENVIAR CONTRAPROPOSTA' : 'ENVIAR PROPOSTA'}
+      <button className="mission-accept setup-confirm" onClick={props.onSend}>
+        🤝 {rejected ? 'Enviar contraproposta' : 'Enviar proposta'}
       </button>
     </PixelModal>
   )
@@ -1844,47 +1850,257 @@ function TaskModal({ state, project, onClose, onAssign, onApprove }: { state: Ga
   )
 }
 
-function TeamModal({ state, onClose, onHire }: { state: GameState; onClose: () => void; onHire: (role: Role) => void }) {
-  const [role, setRole] = useState<Role>('qa')
+function TeamModal({ state, onClose, onHire, onBonus, onTreat, onPsychologist }: { state: GameState; onClose: () => void; onHire: (role: Role, senior?: boolean) => void; onBonus: (employeeId: string) => void; onTreat: (employeeId: string) => void; onPsychologist: () => void }) {
+  const tasks = state.contracts.filter(c => ['accepted', 'inprogress'].includes(c.status)).flatMap(c => c.tasks)
+  const missing = (role: Role) =>
+    !state.employees.some(e => e.role === role) && tasks.some(t => t.status === 'todo' && t.requiredRole === role)
+  const roles: Role[] = ['qa', 'fullstack', 'frontend', 'backend', 'designer']
+  const [role, setRole] = useState<Role>(() => roles.find(missing) ?? 'qa')
+  const canPay = state.balance >= 1_200
+  const desks = deskCapacity(state)
+  const full = state.employees.length >= desks
+  const bars = (e: GameState['employees'][number]): Array<[string, number, string]> => [
+    ['⚡ Energia', e.energy, e.energy < 30 ? 'red' : 'cyan'],
+    ['💎 Qualidade', e.quality, 'gold'],
+    ['🚀 Velocidade', e.speed, 'green'],
+    ['😊 Satisfação', e.satisfaction, e.satisfaction < 30 ? 'red' : 'cyan'],
+  ]
+
   return (
-    <PixelModal title="EQUIPE" subtitle={`${state.employees.length} profissionais na empresa`} onClose={onClose} wide>
-      <div className="team-list">
-        {state.employees.map(employee => (
-          <article key={employee.id}>
-            <span className="pixel-avatar">{employee.name.split(' ').map(part => part[0]).slice(0, 2).join('')}</span>
-            <div>
-              <b>{employee.name}</b>
-              <small>{ROLE_LABEL[employee.role]} · {employee.specialization}</small>
-            </div>
-            <div>
-              <span>ENERGIA {employee.energy}%</span>
-              <span>QUAL. {employee.quality}</span>
-            </div>
-          </article>
-        ))}
+    <PixelModal className="setup-modal team-modal" title="Equipe" subtitle={`${state.employees.length} de ${desks} mesas ocupadas · ${officeOf(state).name}${state.floors?.team ? ' + 2º andar' : ''}`} onClose={onClose} wide>
+      <div className="team-grid">
+        {state.employees.map((employee, index) => {
+          const job = tasks.find(t => t.status === 'inprogress' && t.assignedTo === employee.id)
+          return (
+            <article key={employee.id} className={employee.state === 'burnout' ? 'team-card burnout' : 'team-card'}>
+              <Portrait name={employee.name} index={index} color={ROLE_COLOR[employee.role]} />
+              <div className="team-card-body">
+                <b>{employee.name}</b>
+                <small>{ROLE_LABEL[employee.role]} · {employee.specialization}</small>
+                <small className={`team-zeroes z${employee.zeroes ?? 0}`}>{employee.state === 'burnout' ? '🔥 Burnout: não pode trabalhar' : `Esgotou ${employee.zeroes ?? 0}/2 neste projeto`}</small>
+                {bars(employee).map(([label, value, tone]) => (
+                  <div key={label} className="team-stat">
+                    <small>{label}</small>
+                    <span className={`hud-meter ${tone}`}><i style={{ width: `${Math.min(100, Math.max(0, value))}%` }} /></span>
+                    <small>{Math.round(value)}</small>
+                  </div>
+                ))}
+                <div className="team-card-foot">
+                  <small className={job ? 'team-job busy' : 'team-job'}>{job ? `⚙ ${job.name}` : employee.state === 'working' ? '⚙ Ocupado' : '💤 Livre'}</small>
+                  {employee.state === 'burnout'
+                    ? <button className="team-bonus treat" disabled={state.balance < WELLNESS.treatPrice} onClick={() => onTreat(employee.id)}>🧠 Psicólogo {formatMoney(WELLNESS.treatPrice)}</button>
+                    : <button className="team-bonus" disabled={state.balance < 1_000} onClick={() => onBonus(employee.id)}>🎁 Bônus R$ 1.000</button>}
+                </div>
+              </div>
+            </article>
+          )
+        })}
       </div>
-      <div className="hire-bar">
-        <select value={role} onChange={event => setRole(event.target.value as Role)}>
-          {(['qa', 'fullstack', 'frontend', 'backend', 'designer'] as Role[]).map(item => (
-            <option key={item} value={item}>{ROLE_LABEL[item]}</option>
+
+      <div className={state.psychologist ? 'team-psy hired' : 'team-psy'}>
+        <Portrait name="Helena" index={0} color="#14b8a6" />
+        <div>
+          <b>{state.psychologist ? 'Dra. Helena · psicóloga da empresa' : 'Contratar uma psicóloga para a empresa'}</b>
+          <small>{state.psychologist
+            ? `Equipe 15% mais produtiva, cansa menos e nenhum burnout. Custa ${formatMoney(PSYCHOLOGIST_DAILY)} por dia.`
+            : `Equipe 15% mais produtiva, cansa menos e burnouts tratados na hora. ${formatMoney(WELLNESS.psychHire)} + ${formatMoney(PSYCHOLOGIST_DAILY)} por dia.`}</small>
+        </div>
+        {!state.psychologist && <button className="mission-accept" disabled={state.balance < WELLNESS.psychHire} onClick={onPsychologist}>Contratar</button>}
+      </div>
+
+      <div className="team-hire">
+        <span className="setup-label">Contratar</span>
+        <div className="team-roles" role="group" aria-label="Cargo a contratar">
+          {roles.map(item => (
+            <button key={item} className="team-role" aria-pressed={role === item} onClick={() => setRole(item)}>
+              <i style={{ background: ROLE_COLOR[item] }} />
+              <b>{ROLE_LABEL[item]}</b>
+              {missing(item) && <small>❗ Falta no projeto</small>}
+            </button>
           ))}
-        </select>
-        <button className="pixel-primary" onClick={() => onHire(role)}>+ CONTRATAR · R$ 1.200</button>
+        </div>
+        {full ? (
+          <p className="team-full">🪑 Todas as {desks} mesas estão ocupadas. Amplie o escritório na loja do tutor ou compre um andar pelo elevador.</p>
+        ) : (
+          <div className="team-hire-actions">
+            <button className="mission-accept setup-confirm" disabled={!canPay} onClick={() => onHire(role)}>
+              {canPay ? `+ Contratar ${ROLE_LABEL[role]} · R$ 1.200` : 'Caixa insuficiente · R$ 1.200'}
+            </button>
+            <button className="mission-negotiate setup-confirm senior" disabled={gpusOf(state) < 2} onClick={() => onHire(role, true)}>
+              ★ Sênior · 2 placas
+            </button>
+          </div>
+        )}
       </div>
     </PixelModal>
   )
 }
 
-function FinanceModal({ state, onClose }: { state: GameState; onClose: () => void }) {
+function TutorModal({ state, onFeed, onBuy, onUpgrade, onClose }: { state: GameState; onFeed: () => void; onBuy: () => void; onUpgrade: () => void; onClose: () => void }) {
+  const office = officeOf(state)
+  const upgrade = nextOffice(state)
+  const [act, setAct] = useState<TutorAct>('idle')
+  const eating = act !== 'idle'
+  const timers = useRef<number[]>([])
+  useEffect(() => () => timers.current.forEach(window.clearTimeout), [])
+  const gpus = gpusOf(state)
+  const turbo = turboDaysLeft(state)
+  const canBuy = state.balance >= GPU_PRICE
+
+  function feed() {
+    if (!gpus || turbo > 0 || eating) return
+    onFeed()
+    // Vê a placa, engole, mastiga e arrota
+    const script: Array<[TutorAct, number]> = [['see', 0], ['gulp', 900], ['chew', 1500], ['burp', 3000], ['idle', 4200]]
+    const noise: Partial<Record<TutorAct, Sound>> = { see: 'coin', gulp: 'chomp', chew: 'chomp', burp: 'burp' }
+    timers.current = script.map(([next, at]) => window.setTimeout(() => {
+      setAct(next)
+      const sound = noise[next]
+      if (sound) sfx(sound)
+    }, at))
+  }
+
   return (
-    <PixelModal title="FINANÇAS" subtitle="Sustentabilidade da empresa" onClose={onClose}>
-      <div className="finance-grid">
-        <span>CAIXA<b>{formatMoney(state.balance)}</b></span>
-        <span>RECEITAS<b>{formatMoney(state.revenue)}</b></span>
-        <span>DESPESAS<b>{formatMoney(state.expenses)}</b></span>
-        <span>RESULTADO<b>{formatMoney(state.profit)}</b></span>
+    <PixelModal className="setup-modal tutor-modal" title="Tutor e loja" subtitle="Ele precisa de placas de vídeo para processar imagens" onClose={onClose} wide>
+      <div className="tutor-grid">
+        <div className={`tutor-stage ${turbo ? 'charged' : ''}`}>
+          <TutorScene act={act} />
+          <p className="tutor-bubble">
+            {act === 'see' ? 'Uma placa de vídeo! Agora sim!'
+              : act === 'gulp' || act === 'chew' ? 'Processando imagens a todo vapor…'
+              : act === 'burp' ? 'Imagens processadas! Equipe turbinada!'
+              : turbo ? `Processando imagens por mais ${daysLabel(turbo)}!`
+              : gpus ? 'Preciso de placas de vídeo para processar imagens. Me dá uma?'
+              : 'Sem placa de vídeo não consigo processar imagens. Passe na loja!'}
+          </p>
+        </div>
+
+        <div className="tutor-side">
+          <section className="fin-panel">
+            <h3>Suas placas</h3>
+            <div className="tutor-gems" aria-label={`${gpus} placas de vídeo`}>
+              {gpus === 0 && <small>Nenhuma placa</small>}
+              {Array.from({ length: Math.min(gpus, 6) }, (_, i) => <GpuIcon key={i} />)}
+              {gpus > 6 && <b>+{gpus - 6}</b>}
+            </div>
+            <button className="mission-accept tutor-feed" disabled={!gpus || turbo > 0 || eating} onClick={feed}>
+              {turbo ? `Turbo ativo · ${daysLabel(turbo)}` : gpus ? '▶ Dar uma placa ao tutor' : 'Sem placas'}
+            </button>
+            <ul className="tutor-perks">
+              <li>⚡ Energia da equipe em dobro na hora</li>
+              <li>⏱ Cada tarefa anda o dobro por dia</li>
+              <li>😌 A equipe cansa metade</li>
+              <li>📅 Dura {daysLabel(TURBO_DAYS)}</li>
+            </ul>
+          </section>
+
+          <section className="fin-panel">
+            <h3>Loja</h3>
+            <div className="fin-row"><span><GpuIcon /> Placa de vídeo</span><b>{formatMoney(GPU_PRICE)}</b></div>
+            <button className="mission-negotiate tutor-buy" disabled={!canBuy} onClick={onBuy}>{canBuy ? 'Comprar placa' : 'Caixa insuficiente'}</button>
+            <small>Também ganha uma ao entregar um contrato com 100% de qualidade.</small>
+          </section>
+
+          <section className="fin-panel">
+            <h3>Escritório · {office.name}</h3>
+            {upgrade ? (
+              <>
+                <div className="fin-row"><span>🏢 {upgrade.name}: {upgrade.desks} mesas, equipe recupera +{upgrade.energy} energia e entrega +{upgrade.quality}% de qualidade</span><b>{formatMoney(upgrade.cost)}</b></div>
+                <button className="mission-negotiate tutor-buy" disabled={state.balance < upgrade.cost} onClick={onUpgrade}>{state.balance < upgrade.cost ? 'Caixa insuficiente' : `Mudar para ${upgrade.name}`}</button>
+              </>
+            ) : <small>🏆 Você já está na maior sede.</small>}
+          </section>
+        </div>
       </div>
-      <p className="finance-tip">Custo operacional diário estimado: <b>{formatMoney(dailyEmployeeCost(state))}</b></p>
+    </PixelModal>
+  )
+}
+
+function FinanceModal({ state, onLoan, onRepay, onClose }: { state: GameState; onLoan: () => void; onRepay: () => void; onClose: () => void }) {
+  const bankruptcy = daysToBankruptcy(state)
+  const daily = dailyEmployeeCost(state)
+  const runway = daily > 0 ? Math.floor(state.balance / daily) : null
+  const result = state.revenue - state.expenses
+  const peak = Math.max(state.revenue, state.expenses, 1)
+  const active = state.contracts.filter(c => ['accepted', 'inprogress'].includes(c.status))
+  const payroll = state.employees.reduce((sum, e) => sum + e.salary, 0) / 30
+  // Mesma proporção usada no custo diário: salários + R$ 130 de estrutura
+  const payrollShare = Math.round(daily * payroll / (payroll + 130))
+  const status = state.balance < 0
+    ? { tone: 'bad', title: `Falência em ${daysLabel(bankruptcy ?? 0)}`, text: 'Volte ao azul antes disso: entregue um projeto ou peça um empréstimo.' }
+    : runway !== null && runway < 15
+      ? { tone: 'warn', title: runway === 0 ? 'Não cobre mais um dia' : `Dura ${daysLabel(runway)}`, text: 'O caixa está curto. Evite novos gastos.' }
+      : { tone: 'good', title: runway === null ? 'Sem custo diário' : `Dura ${daysLabel(runway)}`, text: 'As contas estão em dia.' }
+
+  return (
+    <PixelModal className="setup-modal finance-modal" title="Finanças" subtitle="Sustentabilidade da empresa" onClose={onClose} wide>
+      <div className={`fin-vault ${status.tone}`}>
+        <SpinningCoin />
+        <div className="fin-balance">
+          <small>Caixa</small>
+          <b>{formatMoney(state.balance)}</b>
+        </div>
+        <div className="fin-status">
+          <b>{status.title}</b>
+          <small>{status.text}</small>
+        </div>
+      </div>
+
+      <div className="fin-grid">
+        <section className="fin-panel">
+          <h3>Desde a fundação</h3>
+          <div className="fin-flow">
+            <span>▲ Receitas</span>
+            <span className="hud-meter green"><i style={{ width: `${state.revenue / peak * 100}%` }} /></span>
+            <b>{formatMoney(state.revenue)}</b>
+          </div>
+          <div className="fin-flow">
+            <span>▼ Despesas</span>
+            <span className="hud-meter red"><i style={{ width: `${state.expenses / peak * 100}%` }} /></span>
+            <b>{formatMoney(state.expenses)}</b>
+          </div>
+          <div className={`fin-total ${result < 0 ? 'bad' : 'good'}`}>
+            <span>Resultado</span>
+            <b>{result > 0 ? '+' : ''}{formatMoney(result)}</b>
+          </div>
+        </section>
+
+        <section className="fin-panel">
+          <h3>Custo por dia</h3>
+          <div className="fin-row"><span>👥 Salários ({state.employees.length})</span><b>{formatMoney(payrollShare)}</b></div>
+          <div className="fin-row"><span>🏢 Estrutura</span><b>{formatMoney(daily - payrollShare)}</b></div>
+          <div className="fin-total bad"><span>Total por dia</span><b>{formatMoney(daily)}</b></div>
+        </section>
+      </div>
+
+      <section className="fin-panel">
+        <h3>Empréstimo</h3>
+        {state.loan ? (
+          <>
+            <div className="fin-row"><span>🏦 Vence no dia {state.loan.dueDay} (desconto automático)</span><b className="fin-out">{formatMoney(state.loan.owed)}</b></div>
+            <button className="mission-negotiate tutor-buy" disabled={state.balance < state.loan.owed} onClick={onRepay}>Quitar agora</button>
+          </>
+        ) : (
+          <>
+            <div className="fin-row"><span>🏦 Receba {formatMoney(LOAN.amount)} hoje e devolva {formatMoney(LOAN.owed)} em {daysLabel(LOAN.days)}</span><b>20% de juros</b></div>
+            <button className="mission-negotiate tutor-buy" onClick={onLoan}>Pedir empréstimo</button>
+          </>
+        )}
+      </section>
+
+      <section className="fin-panel">
+        <h3>A receber na entrega</h3>
+        {active.length === 0 && <p>Nenhum projeto em andamento. Feche um contrato para gerar receita.</p>}
+        {active.map(contract => {
+          const left = contractDaysRemaining(contract, state.day)
+          return (
+            <div key={contract.id} className="fin-row">
+              <span>📦 {contract.name} <small className={left < 0 ? 'late' : ''}>{left < 0 ? `${daysLabel(-left)} de atraso · multa ${formatMoney(contract.penaltyPerDay)}/dia` : `prazo em ${daysLabel(left)}`}</small></span>
+              <b className="fin-in">{formatMoney(contract.value)}</b>
+            </div>
+          )
+        })}
+      </section>
     </PixelModal>
   )
 }

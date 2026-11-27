@@ -54,6 +54,11 @@ const TASK_BLUEPRINTS_MAP: Record<string, TaskBlueprint[]> = {
   ],
 }
 
+/** Etapas de um tipo de projeto (usadas também pelos contratos gerados) */
+export function blueprintOf(base: string): TaskBlueprint[] {
+  return TASK_BLUEPRINTS_MAP[base] ?? TASK_BLUEPRINTS_MAP['first-contract']
+}
+
 export function makeFirstContract(): Contract {
   return {
     id: 'first-contract',
@@ -244,6 +249,26 @@ export function getAllStarterContracts(): Contract[] {
   ]
 }
 
+/* Placas de vídeo: a moeda premium do jogo */
+export const STARTING_GPUS = 2
+/** Placas extras dadas a todas as empresas (novas e salvas) */
+export const GIFT_GPUS = 3
+export const GPU_PRICE = 5_000
+export const TURBO_DAYS = 5
+
+/* Saves antigos recebem as placas extras uma única vez */
+export function withGpuGift(state: GameState): GameState {
+  return state.gpuGift ? state : { ...state, gpus: gpusOf(state) + GIFT_GPUS, gpuGift: true }
+}
+
+export function gpusOf(state: GameState) {
+  return state.gpus ?? STARTING_GPUS
+}
+
+export function turboDaysLeft(state: GameState) {
+  return Math.max(0, (state.turboUntil ?? 0) - state.day)
+}
+
 export function createInitialState(company: string, founderName: string, difficulty: Difficulty): GameState {
   const team = createStarterTeam().slice(0, 2)
   return {
@@ -255,6 +280,8 @@ export function createInitialState(company: string, founderName: string, difficu
     reputation: 35,
     officeLevel: 1,
     balance: DIFFICULTY_CONFIG[difficulty].balance,
+    gpus: STARTING_GPUS + GIFT_GPUS,
+    gpuGift: true,
     revenue: 0,
     expenses: 0,
     profit: 0,
@@ -321,10 +348,17 @@ export function taskDependenciesDone(task: Task, tasks: Task[]) {
   return task.dependsOn.every(id => tasks.find(candidate => candidate.id === id)?.status === 'done')
 }
 
+/** Salário diário da psicóloga da empresa */
+export const PSYCHOLOGIST_DAILY = 200
+
 export function dailyEmployeeCost(state: GameState) {
   const salaries = state.employees.reduce((total, employee) => total + employee.salary, 0)
-  return Math.round((salaries / 30 + 130) * DIFFICULTY_CONFIG[state.difficulty].dailyCostMultiplier)
+  const psychologist = state.psychologist ? PSYCHOLOGIST_DAILY : 0
+  return Math.round((salaries / 30 + 130 + psychologist) * DIFFICULTY_CONFIG[state.difficulty].dailyCostMultiplier)
 }
+
+/** Ajuste de ritmo: com 1, o primeiro contrato levava ~80 dias para um prazo de 45 */
+export const WORK_PACE = 2
 
 export function calculateTaskGain(
   workerOrProd: { productivity: number; speed: number; role?: Role } | number,
@@ -348,7 +382,7 @@ export function calculateTaskGain(
     }
 
     const baseOutput = (employee.productivity * 0.55 + employee.speed * 0.45) / Math.max(3.5, task.complexity)
-    const output = baseOutput * roleMultiplier * DIFFICULTY_CONFIG[difficulty].productivity
+    const output = baseOutput * roleMultiplier * DIFFICULTY_CONFIG[difficulty].productivity * WORK_PACE
     return Math.max(4, Math.round(output))
   }
 

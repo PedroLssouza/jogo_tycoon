@@ -31,7 +31,7 @@ export function weightedPick<T>(items: T[], weights: number[]): T {
 export function formatMoney(v: number): string {
   const abs = Math.abs(v)
   const sign = v < 0 ? '-' : ''
-  if (abs >= 1e6) return `${sign}R$ ${(abs / 1e6).toFixed(2)}M`
+  if (abs >= 1e6) return `${sign}R$ ${(abs / 1e6).toLocaleString('pt-BR', { maximumFractionDigits: 2 })} mi`
   if (abs >= 1e3) return `${sign}R$ ${(abs / 1e3).toFixed(0)}k`
   return `${sign}R$ ${Math.floor(abs).toLocaleString('pt-BR')}`
 }

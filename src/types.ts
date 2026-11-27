@@ -11,7 +11,7 @@ export type Role =
 
 export type TaskStatus = 'todo' | 'inprogress' | 'review' | 'done'
 export type ContractStatus = 'available' | 'negotiating' | 'rejected' | 'accepted' | 'inprogress' | 'completed' | 'failed'
-export type EmployeeState = 'idle' | 'working' | 'tired' | 'sick' | 'unhappy' | 'job Hunting'
+export type EmployeeState = 'idle' | 'working' | 'tired' | 'sick' | 'unhappy' | 'job Hunting' | 'burnout'
 
 export interface Employee {
   id: string
@@ -28,6 +28,7 @@ export interface Employee {
   state: EmployeeState
   currentTaskId: string | null
   hiredAt: number // day
+  zeroes?: number // vezes que a energia zerou no projeto atual (2 = burnout)
 }
 
 export interface Task {
@@ -120,6 +121,34 @@ export interface GameState {
   employees: Employee[]
   nextEmployeeId: number
 
+  // Coringa Claude (opcionais: saves antigos não têm)
+  jokers?: number // coringas guardados
+  joker?: Employee | null // coringa em ação
+  jokerDay?: number // dia da última tentativa no minigame
+
+  // Placas de vídeo (gemas) e turbo do tutor (opcionais: saves antigos não têm)
+  gpus?: number
+  gpuGift?: boolean // já recebeu as 3 placas extras
+  turboUntil?: number // o turbo vale enquanto day < turboUntil
+
+  // Progressão (opcionais: saves antigos não têm)
+  stats?: GameStats
+  achievements?: string[]
+  loan?: { owed: number; dueDay: number } | null
+  redDays?: number // dias seguidos com caixa negativo
+  pendingEvent?: string | null
+  lastEventDay?: number
+  marketDay?: number // último dia em que o mercado ganhou uma proposta nova
+  contractSeq?: number
+  saleOfferSeen?: boolean
+  ended?: { kind: 'sold' | 'bankrupt'; day: number } | null
+  floors?: { team?: boolean; servers?: boolean } // andares extras do prédio
+  psychologist?: boolean // psicóloga contratada pela empresa
+  lounge?: boolean // sala de jogos e descanso
+  hosting?: HostingDeal[] // racks alugados
+  hostingOffers?: HostingDeal[]
+  hostingDay?: number // último dia em que surgiu proposta de locação
+
   // Contracts
   contracts: Contract[]
   availableContracts: Contract[]
@@ -148,4 +177,23 @@ export interface Notification {
 export interface LogEntry {
   day: number
   message: string
+}
+
+export interface GameStats {
+  contractsDone: number
+  perfect: number
+  gpusEaten: number
+  malwareWins: number
+  malwareFlawless: number
+  quits: number
+}
+
+/** Contrato de locação de servidor: o cliente paga um valor por dia pelos racks */
+export interface HostingDeal {
+  id: string
+  client: string
+  racks: number
+  dailyRent: number
+  days: number
+  startDay: number | null
 }
